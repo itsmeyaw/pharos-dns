@@ -35,6 +35,9 @@ const PROTOCOL_ERROR: VarInt = VarInt::from_u32(2);
 const MAX_POOLED: usize = 64;
 const MAX_POOLED_CAPACITY: usize = 8192;
 
+/// One DoQ Message is at most 65535 octets plus its two-octet length (RFC 9250 §4.2).
+const STREAM_WINDOW: u32 = 66 * 1024;
+
 /// Resource limits of a `quic://` Listener; defaults match CoreDNS v1.15.0.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QuicOptions {
@@ -113,6 +116,13 @@ fn server_config(tls: &ServerTls, options: &QuicOptions, idle: Duration) -> Serv
     // RFC 9250 §4.2: DoQ does not use unidirectional streams.
     transport.max_concurrent_uni_streams(VarInt::from_u32(0));
     transport.max_idle_timeout(IdleTimeout::try_from(idle).ok());
+    // RFC 9250 §5.8: bound what a connection can make the server buffer to its stream credit times one Message.
+    let window = u64::from(STREAM_WINDOW) * options.max_streams.max(1) as u64;
+    transport.stream_receive_window(VarInt::from_u32(STREAM_WINDOW));
+    transport.receive_window(VarInt::from_u64(window).unwrap_or(VarInt::MAX));
+    transport.send_window(window);
+    // RFC 9250 §5.4: pad QUIC packets to the MTU against traffic analysis; quinn exposes this policy.
+    transport.pad_to_mtu(true);
     config.transport_config(Arc::new(transport));
     config
 }
@@ -171,7 +181,24 @@ impl Buffers {
 
 struct Connections {
     active: AtomicUsize,
+    /// Handshakes in progress; they count against `max_connections` before a connection exists.
+    pending: Arc<AtomicUsize>,
     buffers: Buffers,
+}
+
+struct Pending(Arc<AtomicUsize>);
+
+impl Pending {
+    fn new(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self(Arc::clone(counter))
+    }
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 struct ActiveGuard<'a>(&'a AtomicUsize);
@@ -190,6 +217,7 @@ pub(crate) fn spawn<H: Handler>(
     tokio::spawn(async move {
         let state = Arc::new(Connections {
             active: AtomicUsize::new(0),
+            pending: Arc::new(AtomicUsize::new(0)),
             buffers: Buffers(Mutex::new(Vec::new())),
         });
         let mut connections = JoinSet::new();
@@ -218,7 +246,15 @@ pub(crate) fn spawn<H: Handler>(
                         _ => {
                             let current = Arc::new(Shared {
                                 config: server_config(&tls, &options, tcp.idle),
-                                pool: Arc::new(Semaphore::new(options.worker_pool_size)),
+                                // One pool per size, so a Reload that keeps it does not double the workers.
+                                pool: match &shared {
+                                    Some(old) if old.options.worker_pool_size == options.worker_pool_size => {
+                                        Arc::clone(&old.pool)
+                                    }
+                                    _ => Arc::new(Semaphore::new(
+                                        options.worker_pool_size.min(Semaphore::MAX_PERMITS),
+                                    )),
+                                },
                                 tls: quic,
                                 options,
                                 tcp,
@@ -227,6 +263,19 @@ pub(crate) fn spawn<H: Handler>(
                             current
                         }
                     };
+                    // RFC 9250 §5.3, RFC 9000 §8.1.2: at the limit, make the client prove its address with Retry
+                    // before it holds a handshake slot, then refuse.
+                    if current.options.max_connections != 0
+                        && state.pending.load(Ordering::Relaxed) >= current.options.max_connections
+                    {
+                        if incoming.may_retry() {
+                            let _ = incoming.retry();
+                        } else {
+                            incoming.refuse();
+                        }
+                        continue;
+                    }
+                    let handshake = Pending::new(&state.pending);
                     // The identity is chosen per connection so a Reload applies to new connections.
                     let Ok(connecting) = incoming.accept_with(Arc::new(current.config.clone())) else {
                         continue;
@@ -236,6 +285,7 @@ pub(crate) fn spawn<H: Handler>(
                         Arc::clone(&handler),
                         current,
                         Arc::clone(&state),
+                        handshake,
                         shutdown.clone(),
                     ));
                 }
@@ -254,6 +304,7 @@ async fn serve_connection<H: Handler>(
     handler: Arc<H>,
     shared: Arc<Shared>,
     state: Arc<Connections>,
+    handshake: Pending,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let connection = tokio::select! {
@@ -264,6 +315,7 @@ async fn serve_connection<H: Handler>(
             Err(_) => return,
         },
     };
+    drop(handshake);
     // CoreDNS v1.15.0 core/dnsserver/server_quic.go ServeQUIC: a connection over the limit is closed with code 0.
     let count = state.active.fetch_add(1, Ordering::Relaxed) + 1;
     let _active = ActiveGuard(&state.active);
@@ -397,6 +449,11 @@ fn fail(send: &mut SendStream, metrics: Option<&QuicMetrics>) {
 
 async fn serve_stream<H: Handler>(mut stream: Stream<H>) {
     let mut buffers = stream.state.buffers.take();
+    answer(&mut stream, &mut buffers).await;
+    stream.state.buffers.put(buffers);
+}
+
+async fn answer<H: Handler>(stream: &mut Stream<H>, buffers: &mut (Vec<u8>, Vec<u8>)) {
     let metrics = stream.metrics.as_ref();
     // CoreDNS: the read timeout bounds a stalled stream so it cannot hold a worker.
     let read = timeout(
@@ -416,7 +473,7 @@ async fn serve_stream<H: Handler>(mut stream: Stream<H>) {
         Ok(query) if valid_request(&query) => {}
         _ => return abort(&stream.connection, metrics),
     }
-    let (query, response) = &mut buffers;
+    let (query, response) = buffers;
     response.clear();
     // RFC 9250 §4.2: DoQ Messages follow DNS over TCP rules, with no UDP size limit.
     let action =
@@ -443,5 +500,4 @@ async fn serve_stream<H: Handler>(mut stream: Stream<H>) {
         let _ = timeout(stream.tcp.write, stream.send.stopped()).await;
     }
     count(metrics, NO_ERROR);
-    stream.state.buffers.put(buffers);
 }

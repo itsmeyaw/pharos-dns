@@ -368,6 +368,17 @@ async fn zero_max_connections_removes_the_limit() {
     listeners.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn oversized_worker_pool_is_clamped_instead_of_panicking() {
+    let mut handler = Doq::new(&Registry::default());
+    handler.quic.worker_pool_size = usize::MAX;
+    let (listeners, address) = listening(handler).await;
+    let (_endpoint, connection) = connect(address).await;
+    let ok = query(0, &[]);
+    assert_eq!(exchange(&connection, &ok).await, ok);
+    listeners.shutdown().await.unwrap();
+}
+
 // CoreDNS v1.15.0 TestServerQUIC_ServeQUIC_StalledStreamDoesNotStarveWorkerPool.
 #[tokio::test]
 async fn worker_pool_exhaustion_delays_later_streams_until_a_worker_frees() {
