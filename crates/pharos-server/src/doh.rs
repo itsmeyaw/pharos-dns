@@ -27,12 +27,16 @@ pub const PATH: &str = "/dns-query";
 pub const MEDIA_TYPE: &str = "application/dns-message";
 /// RFC 8484 §5.2: HTTP/2 is the recommended minimum, HTTP/1.1 stays available.
 pub const ALPN: &[&[u8]] = &[b"h2", b"http/1.1"];
+/// RFC 9114 §3.1: HTTP/3 is identified by the ALPN token "h3".
+pub const H3_ALPN: &[&[u8]] = &[b"h3"];
 /// CoreDNS v1.15.0 plugin/pkg/doh `maxDNSQuerySize`.
 pub const MAX_QUERY_LEN: usize = 65536;
 /// CoreDNS v1.15.0 core/dnsserver `DefaultHTTPSMaxConnections`.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 200;
 /// CoreDNS v1.15.0 core/dnsserver `DefaultHTTPSMaxStreams`.
 pub const DEFAULT_MAX_STREAMS: u32 = 250;
+/// CoreDNS v1.15.0 core/dnsserver `DefaultHTTPS3MaxStreams`.
+pub const DEFAULT_H3_MAX_STREAMS: u32 = 256;
 
 /// Room for a 64 KiB request target plus ordinary header fields.
 pub const MAX_HEADER_LIST: u32 = 128 * 1024;

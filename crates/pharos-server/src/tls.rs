@@ -62,6 +62,7 @@ pub struct ServerOptions {
 #[derive(Clone)]
 pub struct ServerTls {
     config: Arc<ServerConfig>,
+    quic_tls: Arc<ServerConfig>,
     quic: Arc<QuicServerConfig>,
     policy: Arc<Policy>,
 }
@@ -144,7 +145,8 @@ impl ServerTls {
         // RFC 9001 §4.2: QUIC requires TLS 1.3; RFC 9250 §4.1.1: DoQ negotiates ALPN "doq".
         let mut quic = build(&[&TLS13])?;
         quic.alpn_protocols = vec![b"doq".to_vec()];
-        let quic = QuicServerConfig::try_from(Arc::new(quic)).map_err(invalid)?;
+        let quic_tls = Arc::new(quic);
+        let quic = QuicServerConfig::try_from(Arc::clone(&quic_tls)).map_err(invalid)?;
         let mut client_cas = roots.map(|roots| {
             roots
                 .roots
@@ -166,6 +168,7 @@ impl ServerTls {
         }
         Ok(Self {
             config: Arc::new(config),
+            quic_tls,
             quic: Arc::new(quic),
             policy: Arc::new(Policy {
                 client_auth: options.client_auth,
@@ -194,9 +197,25 @@ impl ServerTls {
         config.alpn_protocols = protocols.iter().map(|protocol| protocol.to_vec()).collect();
         Self {
             config: Arc::new(config),
+            quic_tls: Arc::clone(&self.quic_tls),
             quic: Arc::clone(&self.quic),
             policy: Arc::clone(&self.policy),
         }
+    }
+
+    /// The same identity advertising `protocols` through ALPN on QUIC connections.
+    // RFC 9114 §3.1: HTTP/3 over QUIC is selected by ALPN "h3" instead of DoQ's "doq".
+    pub fn with_quic_alpn(&self, protocols: &[&[u8]]) -> io::Result<Self> {
+        let mut config = (*self.quic_tls).clone();
+        config.alpn_protocols = protocols.iter().map(|protocol| protocol.to_vec()).collect();
+        let quic_tls = Arc::new(config);
+        let quic = QuicServerConfig::try_from(Arc::clone(&quic_tls)).map_err(invalid)?;
+        Ok(Self {
+            config: Arc::clone(&self.config),
+            quic_tls,
+            quic: Arc::new(quic),
+            policy: Arc::clone(&self.policy),
+        })
     }
 
     /// Why this identity cannot share a Listener with `other`, if it cannot.

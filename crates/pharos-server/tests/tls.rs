@@ -2,7 +2,10 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use pharos_server::tls::{ClientAuth, ClientOptions, ServerOptions, ServerTls, client_config};
+use pharos_server::{
+    doh,
+    tls::{ClientAuth, ClientOptions, ServerOptions, ServerTls, client_config},
+};
 use rustls::{
     ClientConfig,
     crypto::aws_lc_rs,
@@ -284,4 +287,14 @@ async fn alpn_without_overlap_fails_the_handshake() {
 async fn alpn_does_not_change_the_shared_listener_policy() {
     let plain = ServerTls::load(&options(ClientAuth::NoCert)).unwrap();
     assert_eq!(plain.conflict(&plain.with_alpn(&[b"h2"])), None);
+}
+
+// RFC 9114 §3.1: the QUIC ALPN changes with the Transport, the identity and shared-Listener policy do not.
+#[tokio::test]
+async fn quic_alpn_does_not_change_the_shared_listener_policy() {
+    let plain = ServerTls::load(&options(ClientAuth::NoCert)).unwrap();
+    assert_eq!(
+        plain.conflict(&plain.with_quic_alpn(doh::H3_ALPN).unwrap()),
+        None
+    );
 }
