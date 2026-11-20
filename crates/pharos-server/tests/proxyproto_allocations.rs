@@ -3,7 +3,7 @@
 use std::{
     alloc::System,
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
 
@@ -15,6 +15,8 @@ use stats_alloc::{INSTRUMENTED_SYSTEM, Stats, StatsAlloc};
 
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
+
+static SERIAL: Mutex<()> = Mutex::new(());
 
 // Queries seen, then the allocator stats at the 101st and 201st.
 type Counts = (usize, Option<Stats>, Option<Stats>);
@@ -148,24 +150,56 @@ fn proxied(tracking: bool) -> Config {
     config
 }
 
-// Each Listener runs in its own test process: nextest isolates the global allocator counts.
+// ADR-0007: the allocator counts are process-wide, so each test reruns itself alone in a child process.
+fn run_isolated(name: &str) -> bool {
+    if std::env::var_os("PHAROS_ALLOCATION_CHILD").is_some() {
+        return false;
+    }
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--nocapture"])
+        .env("PHAROS_ALLOCATION_CHILD", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+    true
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn plain_datagrams_allocate_nothing_with_proxyproto_configured() {
+    if run_isolated("plain_datagrams_allocate_nothing_with_proxyproto_configured") {
+        return;
+    }
     measure(proxied(false), false, false, b"").await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn datagram_headers_allocate_nothing_per_query() {
+    if run_isolated("datagram_headers_allocate_nothing_per_query") {
+        return;
+    }
     measure(proxied(false), false, true, b"ea000107").await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn spectrum_sessions_allocate_nothing_per_query() {
+    if run_isolated("spectrum_sessions_allocate_nothing_per_query") {
+        return;
+    }
     measure(proxied(true), true, false, b"ea000107").await;
 }
 
 #[test]
 fn accept_datagram_allocates_nothing_after_the_first_header() {
+    if run_isolated("accept_datagram_allocates_nothing_after_the_first_header") {
+        return;
+    }
     let mut config = Config::new(|_| Policy::Use);
     config.tlv_metadata = true;
     let mut state = pharos_server::proxyproto::UdpState::default();
