@@ -33,6 +33,7 @@ pub(crate) struct Client<'a> {
     new_order: String,
     nonce: Option<String>,
     kid: String,
+    secure: bool,
 }
 
 /// What a certificate order produced.
@@ -41,6 +42,17 @@ pub(crate) struct Issued {
     pub chain: String,
     /// PKCS#8 private key of the leaf.
     pub key: Vec<u8>,
+}
+
+// RFC 8555 §7.5.1: a server may send Retry-After; RFC 9110 §10.2.3 allows delay-seconds, honoured up to 30 s.
+// shortcut: the HTTP-date form is ignored and the 1 s default used, add date parsing if a CA sends it.
+fn retry_after_of(response: &Response) -> Duration {
+    response
+        .header("retry-after")
+        .and_then(|seconds| seconds.parse().ok())
+        .map_or(POLL, |seconds: u64| {
+            Duration::from_secs(seconds.clamp(1, 30))
+        })
 }
 
 fn field(value: &Value, name: &str) -> io::Result<String> {
@@ -72,6 +84,7 @@ impl<'a> Client<'a> {
                 response.status
             )));
         }
+        let secure = directory.starts_with("https://");
         let directory = json_body(&response)?;
         let mut client = Client {
             http,
@@ -81,6 +94,7 @@ impl<'a> Client<'a> {
             new_order: field(&directory, "newOrder")?,
             nonce: None,
             kid: String::new(),
+            secure,
         };
         // RFC 8555 §7.3: the client agrees to the terms of service as CoreDNS does (`Agreed: true`).
         let mut payload = json!({"termsOfServiceAgreed": true});
@@ -97,11 +111,20 @@ impl<'a> Client<'a> {
         Ok(client)
     }
 
+    // RFC 8555 §6.1: ACME is HTTPS; a CA reached over HTTPS cannot point the client at plain HTTP.
+    fn require_https(&self, url: &str) -> io::Result<()> {
+        if self.secure && !url.starts_with("https://") {
+            return Err(fail(format!("ACME refuses the non-HTTPS URL {url}")));
+        }
+        Ok(())
+    }
+
     // RFC 8555 §7.2: a nonce comes from a HEAD request to newNonce unless a response supplied one.
     async fn nonce(&mut self) -> io::Result<String> {
         if let Some(nonce) = self.nonce.take() {
             return Ok(nonce);
         }
+        self.require_https(&self.new_nonce)?;
         let response = self
             .http
             .request(Method::HEAD, &self.new_nonce, None, Vec::new())
@@ -119,6 +142,7 @@ impl<'a> Client<'a> {
         payload: Option<&Value>,
         identity: Identity<'_>,
     ) -> io::Result<Response> {
+        self.require_https(url)?;
         for attempt in 0..2 {
             let nonce = self.nonce().await?;
             let body = self
@@ -198,6 +222,7 @@ impl<'a> Client<'a> {
         let response = self
             .authenticated(&finalize, Some(&json!({"csr": b64(csr)})))
             .await?;
+        let mut retry_after = retry_after_of(&response);
         let mut order = json_body(&response)?;
         // RFC 8555 §7.4: poll the order until it is "valid" (a certificate URL appears) or "invalid".
         loop {
@@ -217,8 +242,9 @@ impl<'a> Client<'a> {
                     "ACME order for {name} did not become valid in time"
                 )));
             }
-            sleep(POLL).await;
+            sleep(retry_after).await;
             let response = self.authenticated(&order_url, None).await?;
+            retry_after = retry_after_of(&response);
             order = json_body(&response)?;
         }
         let response = self
@@ -296,12 +322,7 @@ impl<'a> Client<'a> {
                     "ACME authorization for {identifier} did not complete in time"
                 )));
             }
-            // RFC 9110 §10.2.3: Retry-After in seconds.
-            let wait = response
-                .header("retry-after")
-                .and_then(|seconds| seconds.parse().ok())
-                .map_or(POLL, |seconds: u64| Duration::from_secs(seconds.min(30)));
-            sleep(wait).await;
+            sleep(retry_after_of(&response)).await;
         }
     }
 }
