@@ -131,21 +131,32 @@ async fn measure(config: Config, header_first: bool, with_header: bool, expected
     listener.shutdown().await.unwrap();
 }
 
-// A separate test process and one runtime thread isolate allocation counts.
+fn proxied(tracking: bool) -> Config {
+    let mut config = Config::new(|_| Policy::Use);
+    config.tlv_metadata = true;
+    if tracking {
+        config.udp_tracking = Some(UdpTracking {
+            ttl: Duration::from_secs(30),
+            max_sessions: 100,
+        });
+    }
+    config
+}
+
+// Each Listener runs in its own test process: nextest isolates the global allocator counts.
 #[tokio::test(flavor = "current_thread")]
-async fn proxied_udp_queries_allocate_nothing_after_the_first_datagram() {
-    let mut per_datagram = Config::new(|_| Policy::Use);
-    per_datagram.tlv_metadata = true;
-    let mut session = Config::new(|_| Policy::Use);
-    session.tlv_metadata = true;
-    session.udp_tracking = Some(UdpTracking {
-        ttl: Duration::from_secs(30),
-        max_sessions: 100,
-    });
-    let plain = Config::new(|_| Policy::Use);
-    measure(plain, false, false, b"query").await;
-    measure(session, true, false, b"queryea000107").await;
-    measure(per_datagram, false, true, b"queryea000107").await;
+async fn plain_datagrams_allocate_nothing_with_proxyproto_configured() {
+    measure(proxied(false), false, false, b"query").await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn datagram_headers_allocate_nothing_per_query() {
+    measure(proxied(false), false, true, b"queryea000107").await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn spectrum_sessions_allocate_nothing_per_query() {
+    measure(proxied(true), true, false, b"queryea000107").await;
 }
 
 #[test]
