@@ -5,7 +5,9 @@
 ## prometheus
 
 - The `prometheus` Directive accepts `runtime_metrics`, but has no effect: Go runtime metrics do not exist in Pharos.
-- The `tls` option is parsed, but any TLS configuration fails startup rather than silently serving unprotected HTTP; Prometheus exporter-toolkit TLS and authentication are not implemented.
+- The `tls` option names an exporter-toolkit v0.20.0 web configuration file: `tls_server_config`, `http_server_config` (`http2`, `headers`) and `basic_auth_users` (bcrypt) are implemented, and an invalid file fails startup before the address is bound.
+- Web configuration files that name `rate_limit` with a nonzero `interval`, `client_allowed_sans`, or inline `cert`, `key` and `client_ca` fail startup instead of being ignored; use `cert_file`, `key_file` and `client_ca_file`.
+- TLS is limited to TLS 1.2 and 1.3 with rustls and aws-lc-rs: a `min_version` of `TLS10` or `TLS11` means TLS 1.2, a `max_version` of `TLS10` or `TLS11` fails startup, and Go's CBC cipher suites and `CurveP521` are skipped with a warning (an empty remainder fails startup).
 - Blocks sharing a metrics address must use the same TLS configuration.
 - Metrics HTTP connections are capped at five seconds total, rather than CoreDNS's separate per-request read, write and idle deadlines, and at 1,024 simultaneous connections.
 - GET and HEAD are served at `/metrics`; recognized other methods return 405 with `Allow: GET, HEAD`, and unknown methods return 501. This replaces the previous 404 behavior.
