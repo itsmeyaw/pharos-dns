@@ -377,6 +377,12 @@ mod siit {
 }
 
 #[path = "functional"]
+mod https {
+    #[path = "https_setup.rs"]
+    mod https_setup;
+}
+
+#[path = "functional"]
 mod tls {
     #[path = "tls_setup.rs"]
     mod tls_setup;

@@ -58,6 +58,7 @@ default = [
     "plugin-header",
     "plugin-health",
     "plugin-hosts",
+    "plugin-https",
     "plugin-k8s-external",
     "plugin-kubernetes",
     "plugin-loadbalance",
