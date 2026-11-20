@@ -138,6 +138,8 @@ pub mod r#loop;
 pub mod metadata;
 #[cfg(feature = "plugin-prometheus")]
 pub mod prometheus;
+#[cfg(feature = "plugin-proxyproto")]
+pub mod proxyproto;
 #[cfg(feature = "plugin-quic")]
 pub mod quic;
 #[cfg(feature = "plugin-ready")]
@@ -540,6 +542,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("multisocket", include_str!("multisocket/README.md")),
     ("nsid", include_str!("nsid/README.md")),
     ("prometheus", include_str!("prometheus/README.md")),
+    ("proxyproto", include_str!("proxyproto/README.md")),
     ("quic", include_str!("quic/README.md")),
     ("ready", include_str!("ready/README.md")),
     ("reload", include_str!("reload/README.md")),
@@ -637,6 +640,8 @@ pub fn servers_with_registry(
     let mut grpc_limits: HashMap<ListenerKey, pharos_server::GrpcOptions> = HashMap::new();
     // Limits of each `https3://` Listener: the first Server Block's `https3` Directive decides both.
     let mut https3_limits: HashMap<ListenerKey, (Option<usize>, Option<usize>)> = HashMap::new();
+    #[cfg(feature = "plugin-proxyproto")]
+    let mut proxies: HashMap<ListenerKey, Arc<pharos_server::proxyproto::Config>> = HashMap::new();
     let mut lifecycle = Lifecycle::default();
     #[cfg(feature = "plugin-debug")]
     let debug = blocks.iter().any(|block| block.config.debug.is_some());
@@ -1063,6 +1068,11 @@ pub fn servers_with_registry(
                 }
             }
             group.3 |= allow_non_in;
+            // CoreDNS v1.15.0 core/dnsserver/server.go NewServer: a later Server Block's proxyproto replaces an earlier one.
+            #[cfg(feature = "plugin-proxyproto")]
+            if let Some(proxy) = &chain.proxyproto {
+                proxies.insert(listener, Arc::clone(&proxy.config));
+            }
             group.0.add(
                 listener,
                 domain,
@@ -1105,6 +1115,10 @@ pub fn servers_with_registry(
                     });
                     server.https.max_connections =
                         connections.unwrap_or(server.https.max_connections);
+                }
+                #[cfg(feature = "plugin-proxyproto")]
+                {
+                    server.proxyproto = proxies.get(&key).cloned();
                 }
                 server.debug = debug;
                 server.allow_non_in = allow_non_in;

@@ -415,6 +415,12 @@ mod https3 {
 }
 
 #[path = "functional"]
+mod proxyproto {
+    #[path = "proxyproto_setup.rs"]
+    mod proxyproto_setup;
+}
+
+#[path = "functional"]
 mod tls {
     #[path = "tls_setup.rs"]
     mod tls_setup;

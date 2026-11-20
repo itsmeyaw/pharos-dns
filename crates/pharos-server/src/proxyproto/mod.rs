@@ -52,7 +52,7 @@ pub struct UdpTracking {
 
 /// PROXY protocol settings of one Listener.
 pub struct Config {
-    policy: Box<dyn Fn(IpAddr) -> Policy + Send + Sync>,
+    decide: Box<dyn Fn(IpAddr) -> Policy + Send + Sync>,
     pub udp_tracking: Option<UdpTracking>,
     pub tlv_metadata: bool,
     pub header_timeout: Duration,
@@ -94,11 +94,17 @@ impl Config {
     #[must_use]
     pub fn new(policy: impl Fn(IpAddr) -> Policy + Send + Sync + 'static) -> Self {
         Self {
-            policy: Box::new(policy),
+            decide: Box::new(policy),
             udp_tracking: None,
             tlv_metadata: false,
             header_timeout: DEFAULT_HEADER_TIMEOUT,
         }
+    }
+
+    /// The policy for connections and datagrams from `address`.
+    #[must_use]
+    pub fn policy(&self, address: IpAddr) -> Policy {
+        (self.decide)(address)
     }
 
     /// Read the PROXY header of an accepted stream, applying the policy for `peer`.
@@ -111,7 +117,7 @@ impl Config {
         mut stream: S,
         peer: SocketAddr,
     ) -> io::Result<Accepted<S>> {
-        let policy = (self.policy)(peer.ip());
+        let policy = self.policy(peer.ip());
         let mut buffer = Vec::new();
         let mut seen = None;
         if policy != Policy::Skip {
@@ -200,7 +206,7 @@ impl Config {
         workers: usize,
     ) -> Option<(usize, SocketAddr)> {
         state.tlv.clear();
-        let policy = (self.policy)(peer.ip());
+        let policy = self.policy(peer.ip());
         if policy == Policy::Skip {
             return Some((0, peer));
         }
