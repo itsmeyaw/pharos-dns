@@ -1,0 +1,8 @@
+.:{port} {
+    proxyproto {
+        allow 192.168.1.1/32 192.168.0.1/32
+    }
+    template IN TXT {
+        answer "{{ .Name }} 60 IN TXT \"{{ .Remote }}\""
+    }
+}

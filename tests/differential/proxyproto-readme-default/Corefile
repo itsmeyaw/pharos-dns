@@ -1,0 +1,6 @@
+.:{port} {
+    proxyproto
+    template IN TXT {
+        answer "{{ .Name }} 60 IN TXT \"{{ .Remote }}\""
+    }
+}

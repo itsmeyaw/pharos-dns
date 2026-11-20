@@ -1,0 +1,11 @@
+.:{port} {
+    metadata
+    proxyproto {
+        allow 192.168.1.1/32
+        tlv_metadata
+    }
+    template IN TXT {
+        answer "{{ .Name }} 60 IN TXT \"{{ .Remote }}\""
+    }
+    log . "{remote} {/proxyproto/tlv}"
+}

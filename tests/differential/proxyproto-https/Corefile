@@ -1,0 +1,9 @@
+https://.:{port} {
+    tls {tls}/server.pem {tls}/server.key.pem
+    proxyproto {
+        allow 127.0.0.1/32
+    }
+    template IN TXT {
+        answer "{{ .Name }} 60 IN TXT \"{{ .Remote }}\""
+    }
+}

@@ -1,0 +1,3 @@
+unanswered example.org. TXT IN tcp +proxy=v2,192.0.2.7:4242
+unanswered example.org. TXT IN tcp +proxy=v1,198.51.100.9:5353
+unanswered example.org. TXT IN udp +proxy=v2,192.0.2.7:4242

@@ -1,0 +1,18 @@
+.:{port} {
+    metadata
+    view tlv {
+        expr metadata('proxyproto/tlv') == '0a00020102'
+    }
+    proxyproto {
+        allow 127.0.0.1/32
+        tlv_metadata
+    }
+    hosts {
+        192.0.2.1 example.org
+    }
+}
+.:{port} {
+    hosts {
+        192.0.2.2 example.org
+    }
+}
