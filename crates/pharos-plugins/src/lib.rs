@@ -79,6 +79,8 @@ pub mod health;
 pub mod hosts;
 #[cfg(feature = "plugin-https")]
 pub mod https;
+#[cfg(feature = "plugin-https3")]
+pub mod https3;
 mod ipnet;
 #[cfg(feature = "plugin-k8s-external")]
 pub mod k8s_external;
@@ -521,6 +523,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("health", include_str!("health/README.md")),
     ("hosts", include_str!("hosts/README.md")),
     ("https", include_str!("https/README.md")),
+    ("https3", include_str!("https3/README.md")),
     ("k8s_external", include_str!("k8s_external/README.md")),
     ("kubernetes", include_str!("kubernetes/README.md")),
     ("loadbalance", include_str!("loadbalance/README.md")),
