@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! A small durable ordered key-value store in one file.
 //!
 //! The whole state lives in memory. Durability comes from a checksummed
