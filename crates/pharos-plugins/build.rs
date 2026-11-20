@@ -13,6 +13,7 @@ fn config_only(name: &str) -> bool {
             | "multisocket"
             | "tls"
             | "https"
+            | "grpc_server"
             | "quic"
             | "ready"
             | "health"
@@ -90,6 +91,7 @@ fn main() {
             "multisocket" => "Option<usize>",
             "tls" => "tls::Tls",
             "https" => "https::Https",
+            "grpc_server" => "grpc_server::GrpcServer",
             "quic" => "quic::Quic",
             "whoami" => "whoami::Whoami",
             "view" => "view::View",
@@ -149,6 +151,7 @@ fn main() {
             "multisocket" => "multisocket::setup::setup",
             "tls" => "tls::setup::setup",
             "https" => "https::setup::setup",
+            "grpc_server" => "grpc_server::setup::setup",
             "quic" => "quic::setup::setup",
             "whoami" => "whoami::setup::setup",
             "view" => "view::setup::setup",

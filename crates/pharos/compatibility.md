@@ -112,6 +112,10 @@
 
 - [header Plugin notes](../crates/pharos-plugins/src/header/README.md)
 
+## grpc_server
+
+- [grpc_server Plugin notes](../crates/pharos-plugins/src/grpc_server/README.md)
+
 ## health
 
 - [health Plugin notes](../crates/pharos-plugins/src/health/README.md)
