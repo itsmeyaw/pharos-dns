@@ -4,11 +4,13 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use pharos_server::{
     Action, Handler, ListenerKey, ListenerRegistry, Protocol, Transport,
-    proxyproto::{Config, Policy, UdpTracking},
+    proxyproto::{Config, Policy},
+    tls::{ClientAuth, ClientOptions, ServerOptions, ServerTls, TlsConnector, client_config},
 };
+use rustls::pki_types::ServerName;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpStream, UdpSocket},
+    net::TcpStream,
     time::timeout,
 };
 
@@ -17,9 +19,19 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(3);
 /// Answers every Query with the peer address and TLV hex the Listener reported.
 struct Probe {
     config: Arc<Config>,
+    tls: Option<ServerTls>,
+}
+
+fn fixture(name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/tls")
+        .join(name)
 }
 
 impl Handler for Probe {
+    fn tls(&self) -> Option<ServerTls> {
+        self.tls.clone()
+    }
     fn proxyproto(&self) -> Option<Arc<Config>> {
         Some(Arc::clone(&self.config))
     }
@@ -70,15 +82,24 @@ fn key() -> ListenerKey {
 }
 
 async fn listening(config: Config) -> (ListenerRegistry, SocketAddr) {
+    listening_on(key(), config, None).await
+}
+
+async fn listening_on(
+    key: ListenerKey,
+    config: Config,
+    tls: Option<ServerTls>,
+) -> (ListenerRegistry, SocketAddr) {
     let mut registry = ListenerRegistry::default();
     let handler = Probe {
         config: Arc::new(config),
+        tls,
     };
     registry
-        .apply(HashMap::from([(key(), handler)]))
+        .apply(HashMap::from([(key, handler)]))
         .await
         .unwrap();
-    let address = registry.get(&key()).unwrap().local_addr();
+    let address = registry.get(&key).unwrap().local_addr();
     (registry, address)
 }
 
@@ -230,5 +251,81 @@ async fn tcp_truncated_and_malicious_headers_close_the_connection() {
     registry.shutdown().await.unwrap();
 }
 
-#[allow(dead_code)]
-fn unused(_: UdpTracking, _: UdpSocket) {}
+// RFC 7858 §3.2: DoT is TLS over TCP; PROXY protocol §2 puts the header ahead of the ClientHello.
+#[tokio::test]
+async fn tls_listener_reads_the_header_before_the_handshake() {
+    let tls = ServerTls::load(&ServerOptions {
+        cert: fixture("server.pem"),
+        key: fixture("server.key.pem"),
+        ca: None,
+        client_auth: ClientAuth::NoCert,
+        keylog: None,
+    })
+    .unwrap();
+    let key = ListenerKey {
+        transport: Transport::Tls,
+        address: "127.0.0.1:0".parse().unwrap(),
+    };
+    let (registry, address) = listening_on(key, config(Policy::Use), Some(tls)).await;
+    let mut tcp = TcpStream::connect(address).await.unwrap();
+    tcp.write_all(&v2(0x11, &[0xEA, 0, 1, 7])).await.unwrap();
+    let client = client_config(&ClientOptions {
+        ca: Some(fixture("ca.pem")),
+        identity: None,
+    })
+    .unwrap();
+    let mut stream = TlsConnector::from(client)
+        .connect(ServerName::try_from("localhost").unwrap(), tcp)
+        .await
+        .unwrap();
+    stream.write_all(&framed(b"query")).await.unwrap();
+    let length = timeout(TEST_TIMEOUT, stream.read_u16())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut response = vec![0; length.into()];
+    stream.read_exact(&mut response).await.unwrap();
+    assert_eq!(response, b"192.0.2.1:12345|ea000107");
+    registry.shutdown().await.unwrap();
+}
+
+// RFC 7858 §3.2: a TLS ClientHello without a PROXY header is served under `use`.
+#[tokio::test]
+async fn tls_listener_serves_clients_that_send_no_header_under_use() {
+    let tls = ServerTls::load(&ServerOptions {
+        cert: fixture("server.pem"),
+        key: fixture("server.key.pem"),
+        ca: None,
+        client_auth: ClientAuth::NoCert,
+        keylog: None,
+    })
+    .unwrap();
+    let key = ListenerKey {
+        transport: Transport::Tls,
+        address: "127.0.0.1:0".parse().unwrap(),
+    };
+    let (registry, address) = listening_on(key, config(Policy::Use), Some(tls)).await;
+    let tcp = TcpStream::connect(address).await.unwrap();
+    let client = client_config(&ClientOptions {
+        ca: Some(fixture("ca.pem")),
+        identity: None,
+    })
+    .unwrap();
+    let mut stream = TlsConnector::from(client)
+        .connect(ServerName::try_from("localhost").unwrap(), tcp)
+        .await
+        .unwrap();
+    stream.write_all(&framed(b"query")).await.unwrap();
+    let length = timeout(TEST_TIMEOUT, stream.read_u16())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut response = vec![0; length.into()];
+    stream.read_exact(&mut response).await.unwrap();
+    assert!(
+        String::from_utf8(response)
+            .unwrap()
+            .starts_with("127.0.0.1:")
+    );
+    registry.shutdown().await.unwrap();
+}
