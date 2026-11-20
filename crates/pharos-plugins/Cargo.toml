@@ -61,6 +61,7 @@ default = [
     "plugin-file",
     "plugin-erratic",
     "plugin-forward",
+    "plugin-grpc-server",
     "plugin-header",
     "plugin-health",
     "plugin-hosts",

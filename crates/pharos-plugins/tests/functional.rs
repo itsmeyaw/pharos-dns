@@ -367,6 +367,12 @@ mod server {
 }
 
 #[path = "functional"]
+mod grpc_server {
+    #[path = "grpc_server_setup.rs"]
+    mod grpc_server_setup;
+}
+
+#[path = "functional"]
 mod quic {
     #[path = "quic_setup.rs"]
     mod quic_setup;

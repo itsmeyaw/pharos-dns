@@ -57,6 +57,8 @@ pub mod expression;
 #[cfg(feature = "plugin-file")]
 pub mod file;
 pub mod gotemplate;
+#[cfg(feature = "plugin-grpc-server")]
+pub mod grpc_server;
 #[cfg(feature = "plugin-header")]
 pub mod header;
 #[cfg(any(
@@ -514,6 +516,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("auto", include_str!("auto/README.md")),
     ("secondary", include_str!("secondary/README.md")),
     ("forward", include_str!("forward/README.md")),
+    ("grpc_server", include_str!("grpc_server/README.md")),
     ("header", include_str!("header/README.md")),
     ("health", include_str!("health/README.md")),
     ("hosts", include_str!("hosts/README.md")),
@@ -622,6 +625,8 @@ pub fn servers_with_registry(
     let mut groups: HashMap<ListenerKey, ListenerGroup> = HashMap::new();
     // Limits of each `https://` Listener: the first Server Block's connection limit and the one explicit stream limit.
     let mut https_limits: HashMap<ListenerKey, (Option<usize>, Option<u32>)> = HashMap::new();
+    // Limits of each `grpc://` Listener: the first Server Block's.
+    let mut grpc_limits: HashMap<ListenerKey, pharos_server::GrpcOptions> = HashMap::new();
     let mut lifecycle = Lifecycle::default();
     #[cfg(feature = "plugin-debug")]
     let debug = blocks.iter().any(|block| block.config.debug.is_some());
@@ -766,6 +771,7 @@ pub fn servers_with_registry(
                 "tls" if tls.is_some() => Transport::Tls,
                 "tls" => return Err(requires_tls()),
                 "quic" if tls.is_some() => Transport::Quic,
+                "grpc" if tls.is_some() => Transport::Grpc,
                 "https" | "grpc" | "quic" | "https3" if tls.is_none() => return Err(requires_tls()),
                 "https" => Transport::Https,
                 _ => {
@@ -934,7 +940,7 @@ pub fn servers_with_registry(
             });
             if matches!(
                 listener.transport,
-                Transport::Tls | Transport::Https | Transport::Quic
+                Transport::Tls | Transport::Https | Transport::Grpc | Transport::Quic
             ) && let Some(tls) = &tls
             {
                 match &group.4 {
@@ -947,6 +953,7 @@ pub fn servers_with_registry(
                                     "conflicting TLS configuration for shared listener {}://{} between zones {zone:?} and {:?}: {reason}",
                                     match listener.transport {
                                         Transport::Tls => "tls",
+                                        Transport::Grpc => "grpc",
                                         Transport::Quic => "quic",
                                         _ => "https",
                                     },
@@ -958,6 +965,16 @@ pub fn servers_with_registry(
                     }
                     None => group.4 = Some((tls.clone(), domain.to_string())),
                 }
+            }
+            // CoreDNS v1.15.0 core/dnsserver/server_grpc.go NewServergRPC: the first Server Block's limits apply.
+            #[cfg(feature = "plugin-grpc-server")]
+            if listener.transport == Transport::Grpc {
+                grpc_limits.entry(listener).or_insert_with(|| {
+                    chain
+                        .grpc_server
+                        .as_ref()
+                        .map_or_else(Default::default, grpc_server::GrpcServer::options)
+                });
             }
             #[cfg(feature = "plugin-https")]
             if listener.transport == Transport::Https {
@@ -1014,15 +1031,16 @@ pub fn servers_with_registry(
             |(key, (router, workers, tcp_options, allow_non_in, tls, quic))| {
                 let mut server = Server::with_registry(router, key, metrics.clone());
                 server.tcp_options = tcp_options;
-                // RFC 7301 §3.1: an HTTPS Listener offers h2 and http/1.1 through ALPN.
-                server.tls = tls.map(|(tls, _)| {
-                    if key.transport == Transport::Https {
-                        tls.with_alpn(pharos_server::doh::ALPN)
-                    } else {
-                        tls
-                    }
+                // RFC 7301 §3.1: an HTTPS Listener offers h2 and http/1.1 through ALPN, a gRPC Listener only h2.
+                server.tls = tls.map(|(tls, _)| match key.transport {
+                    Transport::Https => tls.with_alpn(pharos_server::doh::ALPN),
+                    Transport::Grpc => tls.with_alpn(pharos_server::grpc::ALPN),
+                    _ => tls,
                 });
                 server.quic = quic;
+                if let Some(options) = grpc_limits.get(&key) {
+                    server.grpc = *options;
+                }
                 if let Some((connections, streams)) = https_limits.get(&key) {
                     server.https.max_connections =
                         connections.unwrap_or(server.https.max_connections);
