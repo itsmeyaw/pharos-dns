@@ -8,10 +8,10 @@ independent Corefile examples. Skipped entries explain why they cannot run.
 | Plugin and README example | Differential scenario or reason |
 | --- | --- |
 | root: filesystem root | `root-readme` |
-| root: TLS and root | Skipped: TLS Listeners are deferred to M3. |
+| root: TLS and root | `root-tls-readme` |
 | metadata: prose refers to rewrite | No Corefile; `rewrite-name-metadata` exercises the referenced use. |
 | cancel: default; one second | `cancel-default`; `cancel-custom` |
-| timeouts: TLS; HTTPS; QUIC | Skipped: encrypted Listeners are deferred to M3. |
+| timeouts: TLS; HTTPS; QUIC | `timeouts-tls-readme`; `timeouts-https-readme`; `timeouts-quic-readme` (`timeouts-https3` adds the `https3://` Listener, which the README does not show) |
 | timeouts: TCP read/write; max queries | `timeouts-tcp`; `timeouts-max` |
 | nsid: explicit string | `nsid` |
 | bufsize: forward; file | `bufsize-forward`; `bufsize-file-readme` |
@@ -52,3 +52,31 @@ independent Corefile examples. Skipped entries explain why they cannot run.
 | erratic: drop 3; default drop; delay; delay and truncate; drop/truncate | `erratic-drop`; default drop skipped because timeouts abort comparisons; `erratic-delay`; `erratic-truncate-delay`; drop/truncate skipped for the same reason. |
 | sign: file output; two directory-key examples; unspecified origin pitfall | `sign-readme`; directory-key examples skipped because CoreDNS rejects the unimplemented option; pitfall has no stable Response. |
 | view: CIDR; type; regex | `view-cidr`; `view-type`; `view-regex`. Non-loopback CIDR branches require Rust tests. |
+
+# M3 encrypted Transport audit
+
+Encrypted Listeners and Upstreams use the shared fixtures in `tests/fixtures/tls`
+(`{tls}`); the fixture CA replaces public resolvers such as 9.9.9.9. Scenarios
+answer with `hosts` and `template` rather than `whoami`. Clients are `tls`,
+`https`, `https3`, `quic` and `grpc` Query types; `+proxy=` prefixes a PROXY
+header.
+
+| Plugin and README example | Differential scenario or reason |
+| --- | --- |
+| tls: certificate for `tls://`, `grpc://`, `https://` Server Blocks | `tls-readme-dot`; `tls-readme-grpc`; `tls-readme-https`; `tls-basic` |
+| tls: `client_auth` | `tls-client-auth-nocert`; `tls-client-auth-require` (no client certificate, so both servers refuse the handshake). A presented client certificate is not sent by the harness. |
+| tls: `keylog` | `tls-keylog` (the key log file content is not compared) |
+| tls: `acme` | Skipped: needs a live ACME CA and reachable authoritative DNS. |
+| quic: default; `max_streams`, `max_connections`, `worker_pool_size` | `quic-readme-default`; `quic-readme-limits`; `quic-basic` |
+| https: `max_connections`, `max_streams`; unbounded `0` | `https-readme-limits`; `https-readme-unbounded`; `https-basic` |
+| https3: `max_streams`; `0` | `https3-readme-streams`; `https3-readme-default`; `https3-basic` |
+| grpc_server: `max_streams`, `max_connections`; unbounded `0` | `grpc-server-readme-limits`; `grpc-server-readme-unbounded` |
+| grpc: zone; balance; except; resolv.conf; TLS; fallthrough | `grpc-readme-zone`; `grpc-readme-balance`; `grpc-readme-except`; `grpc-readme-resolv`; `grpc-readme-tls` and `grpc-readme-multi-tls`; `grpc-readme-fallthrough` |
+| proxyproto: default; `allow`; `default reject`; `udp_session_tracking`; with max sessions; `tlv_metadata` | `proxyproto-readme-default`; `proxyproto-readme-allow`; `proxyproto-readme-reject`; `proxyproto-readme-session`; `proxyproto-readme-session-max`; `proxyproto-readme-tlv` |
+| proxyproto: sources that are allowed | The README `allow` ranges exclude loopback, so `proxyproto-allow-loopback`, `proxyproto-session-loopback`, `proxyproto-tlv-loopback` and `proxyproto-client-ip` allow 127.0.0.1 to exercise the header; `proxyproto-reject-loopback` rejects it. |
+| proxyproto: DoT, DoH and gRPC | `proxyproto-tls`; `proxyproto-https`; `proxyproto-grpc` |
+| proxyproto: DoQ and DoH3 | Skipped: the harness cannot place the PROXY datagram ahead of a QUIC handshake. |
+| forward: `tls://` with `tls_servername`; two endpoints; `domain` | `forward-readme-dot`; `forward-readme-dot-multi`; `forward-readme-dot-domain` |
+| forward: `quic://`; `https://` | `forward-readme-doq`; `forward-readme-doh` |
+| forward: `%` per-endpoint server name | `forward-readme-dot-sni`; `forward-readme-doq-sni` |
+| forward: DoT Server Blocks with different `tls_servername` | Skipped: the fixture certificate has one name; `forward-readme-dot-sni` covers per-endpoint names. |
