@@ -11,6 +11,7 @@
 - The BIND key pair in `crates/pharos-dnssec/tests/fixtures` is from CoreDNS v1.15.0's `plugin/sign/testdata`.
 - `crates/pharos-plugins/plugin.cfg` follows CoreDNS v1.15.0.
 - The tls Plugin, shared-Listener TLS checks and tests follow CoreDNS v1.15.0's `plugin/tls`, `plugin/pkg/tls` and `core/dnsserver/tlsconfig.go`; fixtures in `tests/fixtures/tls` are newly generated.
+- The tls Plugin ACME option parsing, DNS-01 challenge handler and tests (`crates/pharos-plugins/src/tls/acme`) follow CoreDNS v1.15.0's `plugin/tls/acme.go`, `tls.go` and `acme_test.go`; retry intervals and the renewal window follow certmagic v0.25.
 - The https Plugin, DoH request handling (`crates/pharos-server/src/doh.rs`) and tests follow CoreDNS v1.15.0's `plugin/https`, `plugin/pkg/doh` and `core/dnsserver/server_https.go`.
 - The quic Plugin, DoQ stream handling and tests follow CoreDNS v1.15.0's `plugin/quic`, `core/dnsserver/server_quic.go` and `server_quic_test.go`.
 - The https3 Plugin, HTTP/3 Listener and tests follow CoreDNS v1.15.0's `plugin/https3`, `core/dnsserver/server_https3.go` and `server_https3_test.go`.

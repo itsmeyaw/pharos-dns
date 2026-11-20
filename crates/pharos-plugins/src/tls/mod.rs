@@ -1,17 +1,59 @@
 //! `tls` Directive: the server certificate of encrypted Listeners.
 
+pub(crate) mod acme;
 pub(crate) mod setup;
 
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use pharos_corefile::{Cursor, Error};
-use pharos_server::tls::{ClientAuth, ServerOptions, ServerTls};
+use pharos_server::{
+    Context, Next, Outcome, Plugin,
+    tls::{ClientAuth, ServerOptions, ServerTls},
+};
 
 /// A loaded TLS identity and the settings it was loaded with.
 #[derive(Debug)]
 pub struct Tls {
-    pub options: ServerOptions,
-    pub server: ServerTls,
+    /// The files of a `tls CERT KEY [CA]` identity.
+    pub options: Option<ServerOptions>,
+    /// The identity encrypted Listeners present; absent when the Server Block only answers challenges.
+    pub server: Option<ServerTls>,
+    /// The ACME configuration of a `tls { acme ... }` block.
+    pub acme: Option<Arc<acme::Entry>>,
+    // The process-wide DNS-01 challenge state, attached to every Server Block when any block uses ACME.
+    challenges: Option<Arc<acme::Solver>>,
+}
+
+impl Tls {
+    /// Whether this Server Block answers `_acme-challenge` TXT Queries.
+    #[must_use]
+    pub fn answers_challenges(&self) -> bool {
+        self.challenges.is_some()
+    }
+
+    /// A Server Block without a `tls` Directive that still answers challenges for other blocks' ACME entries.
+    pub(crate) fn challenge_only(solver: Arc<acme::Solver>) -> Self {
+        Self {
+            options: None,
+            server: None,
+            acme: None,
+            challenges: Some(solver),
+        }
+    }
+
+    /// Attach the challenge state this process answers from.
+    pub(crate) fn answer_challenges(&mut self, solver: Arc<acme::Solver>) {
+        self.challenges = Some(solver);
+    }
+}
+
+impl Plugin for Tls {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
+        match &self.challenges {
+            Some(solver) => solver.serve(cx, next).await,
+            None => next.run(cx).await,
+        }
+    }
 }
 
 // CoreDNS v1.15.0 plugin/tls/tls.go parseTLS: every `tls` line loads; the last one wins.
@@ -19,13 +61,18 @@ pub(crate) fn parse(cursor: &mut Cursor<'_>, root: Option<&Path>) -> Result<Tls,
     let mut tls = None;
     while cursor.next() {
         let args = cursor.remaining_args();
-        if args.is_empty() {
-            // CoreDNS obtains certificates itself here; Pharos has no ACME client yet.
-            return Err(
-                cursor.error("ACME certificate management is not supported; give CERT KEY [CA]")
-            );
-        }
-        tls = Some(parse_manual(cursor, root, &args)?);
+        tls = Some(if args.is_empty() {
+            // CoreDNS v1.15.0 plugin/tls/tls.go parseTLS: no arguments selects ACME.
+            let entry = acme::parse(cursor, root)?;
+            Tls {
+                options: None,
+                server: Some(entry.server()),
+                acme: Some(Arc::new(entry)),
+                challenges: None,
+            }
+        } else {
+            parse_manual(cursor, root, &args)?
+        });
     }
     tls.ok_or_else(|| cursor.arg_err())
 }
@@ -78,5 +125,10 @@ fn parse_manual(
         keylog,
     };
     let server = ServerTls::load(&options).map_err(|error| cursor.error(error.to_string()))?;
-    Ok(Tls { options, server })
+    Ok(Tls {
+        options: Some(options),
+        server: Some(server),
+        acme: None,
+        challenges: None,
+    })
 }
