@@ -1,6 +1,7 @@
 //! Prometheus Directive configuration.
 
 pub(crate) mod setup;
+pub(crate) mod web_config;
 
 use pharos_corefile::{Cursor, Error};
 use pharos_server::{Context, Next, Outcome, Plugin};
