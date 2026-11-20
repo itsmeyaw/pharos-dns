@@ -23,7 +23,11 @@ pub(crate) fn proxied<H: Handler>(
 ) -> Option<(usize, SocketAddr)> {
     let client = crate::canonical_peer(peer);
     match handler.proxyproto() {
-        None => Some((0, client)),
+        None => {
+            // Reload: a Listener without PROXY settings must not reuse the TLVs of an earlier datagram.
+            state.tlv.clear();
+            Some((0, client))
+        }
         Some(config) => {
             if state.workers == 0 && config.udp_tracking.is_some() {
                 state.workers = handler.udp_workers();

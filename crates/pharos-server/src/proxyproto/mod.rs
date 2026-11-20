@@ -255,6 +255,10 @@ impl Config {
         let client = state.sessions.as_mut().and_then(|sessions| {
             sessions.lookup(peer, Instant::now(), tracking.ttl, &mut state.tlv)
         });
+        // Reload: a session cached while `tlv_metadata` was on publishes no TLVs once it is off.
+        if !self.tlv_metadata {
+            state.tlv.clear();
+        }
         Some((0, client.unwrap_or(peer)))
     }
 }
@@ -567,6 +571,20 @@ mod tests {
             PROXY,
         );
         assert_eq!(result, Some((header, addr(PROXY))));
+    }
+
+    #[test]
+    fn cached_tlvs_are_not_published_after_tlv_metadata_is_turned_off() {
+        let mut state = UdpState::default();
+        let mut wire = v2(0x12, &[0xEA, 0, 1, 7]);
+        datagram(&tracking(Policy::Use), &mut state, &wire, PROXY);
+        wire.clear();
+        wire.extend(b"DNS");
+        let mut reloaded = tracking(Policy::Use);
+        reloaded.tlv_metadata = false;
+        let result = datagram(&reloaded, &mut state, &wire, PROXY);
+        assert_eq!(result, Some((0, addr("192.0.2.1:12345"))));
+        assert_eq!(state.tlv, "");
     }
 
     #[test]
