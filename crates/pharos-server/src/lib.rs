@@ -34,11 +34,13 @@ pub mod metrics;
 mod outcome;
 mod panic;
 mod process_metrics;
+mod quic;
 mod quota;
 pub use admission::{Admission, admit, admit_with_update};
 pub use lifecycle::{Lifecycle, Phase};
 pub use outcome::{TsigSigning, finish_outcome, finish_outcome_signed, response_limit};
 pub use panic::{contain_panic, panics_total};
+pub use quic::{QuicMetrics, QuicOptions, bind as bind_quic_socket};
 mod router;
 mod server;
 mod shed;
@@ -853,6 +855,14 @@ pub trait Handler: Send + Sync + 'static {
     fn https(&self) -> HttpsOptions {
         HttpsOptions::default()
     }
+    /// Resource limits of a `quic://` Listener.
+    fn quic_options(&self) -> QuicOptions {
+        QuicOptions::default()
+    }
+    /// Response counters of a `quic://` Listener.
+    fn quic_metrics(&self) -> Option<QuicMetrics> {
+        None
+    }
     /// Number of UDP worker sockets for this Listener.
     fn udp_workers(&self) -> usize {
         quota::worker_count()
@@ -1005,6 +1015,21 @@ impl Listener {
             address,
             stop,
             tasks: vec![https::spawn(tcp, handler, receiver)],
+            udp_stop,
+            udp_tasks: Vec::new(),
+            shed: false,
+        })
+    }
+
+    /// Bind a QUIC Listener that serves DNS over QUIC (RFC 9250); it has no TCP or plain UDP sockets.
+    pub async fn bind_quic<H: Handler>(address: SocketAddr, handler: H) -> io::Result<Self> {
+        let (endpoint, address) = quic::endpoint(address, &handler)?;
+        let (stop, receiver) = watch::channel(false);
+        let (udp_stop, _) = watch::channel(false);
+        Ok(Self {
+            address,
+            stop,
+            tasks: vec![quic::spawn(endpoint, Arc::new(handler), receiver)],
             udp_stop,
             udp_tasks: Vec::new(),
             shed: false,
@@ -1487,7 +1512,7 @@ impl ListenerRegistry {
         if desired.iter().any(|key| {
             !matches!(
                 key.transport,
-                Transport::Dns | Transport::Tls | Transport::Https
+                Transport::Dns | Transport::Tls | Transport::Https | Transport::Quic
             )
         }) {
             return Err(io::Error::new(
@@ -1537,6 +1562,7 @@ impl ListenerRegistry {
             let bound = match key.transport {
                 Transport::Tls => Listener::bind_tls(key.address, handler_for_listener).await,
                 Transport::Https => Listener::bind_https(key.address, handler_for_listener).await,
+                Transport::Quic => Listener::bind_quic(key.address, handler_for_listener).await,
                 _ => Listener::bind(key.address, handler_for_listener).await,
             };
             let listener = match bound {
@@ -1555,7 +1581,7 @@ impl ListenerRegistry {
         }
         let mut replacements = Vec::new();
         for (key, server) in &servers {
-            // RFC 7858 §3.1: an encrypted Transport listens on TCP only.
+            // RFC 7858 §3.1; RFC 9250 §4.1: an encrypted Transport has no plain UDP workers.
             if key.transport != Transport::Dns {
                 continue;
             }
@@ -1692,6 +1718,12 @@ impl<H: Handler> Handler for Swappable<H> {
     }
     fn https(&self) -> HttpsOptions {
         self.0.load().https()
+    }
+    fn quic_options(&self) -> QuicOptions {
+        self.0.load().quic_options()
+    }
+    fn quic_metrics(&self) -> Option<QuicMetrics> {
+        self.0.load().quic_metrics()
     }
     fn udp_workers(&self) -> usize {
         self.0.load().udp_workers()
