@@ -25,3 +25,4 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "tim
 
 [dev-dependencies]
 pharos-proto = { version = "0.2.0", path = "../pharos-proto" }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }

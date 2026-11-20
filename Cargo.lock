@@ -2252,6 +2252,7 @@ dependencies = [
  "pharos-plugins",
  "pharos-proto",
  "pharos-server",
+ "rustls",
  "tokio",
 ]
 
