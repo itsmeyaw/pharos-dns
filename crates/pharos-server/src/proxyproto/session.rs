@@ -20,6 +20,7 @@ struct Node {
 }
 
 /// Maps the proxy-side address of a datagram flow to the client address its header named.
+// CoreDNS v1.15.0 plugin/pkg/proxyproto/udp_session.go: a bounded LRU whose entries expire after the TTL.
 pub struct Sessions {
     capacity: usize,
     index: HashMap<SocketAddr, usize>,
@@ -88,6 +89,13 @@ impl Sessions {
         };
         self.index.insert(key, at);
         self.link_newest(at);
+    }
+
+    /// The source of a live session, without refreshing its expiry.
+    #[must_use]
+    pub fn peek(&self, key: SocketAddr, now: Instant, ttl: Duration) -> Option<SocketAddr> {
+        let node = &self.nodes[*self.index.get(&key)?];
+        (now.saturating_duration_since(node.seen) < ttl).then_some(node.source)
     }
 
     /// Return the client address of a live session, refreshing its expiry, and copy its TLV hex into `tlv`.

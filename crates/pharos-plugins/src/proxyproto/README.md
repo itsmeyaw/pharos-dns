@@ -20,6 +20,7 @@
 - Reload applies new `allow`, `default`, `tlv_metadata` and `udp_session_tracking` TTL values to connections and datagrams accepted afterwards; established connections keep the peer address and TLVs they were accepted with.
 - A QUIC connection keeps the client address and TLVs it was accepted with; the proxy-to-client mapping outlives `udp_session_tracking`'s `DURATION` for as long as the connection can stay idle (`timeouts` idle, 10 seconds by default), so replies keep reaching the proxy. A connection that migrates to a new proxy-side address is not followed.
 - For `quic://` and `https3://` CoreDNS captures TLVs only with `udp_session_tracking`; Pharos also captures them from per-datagram headers.
+- While a QUIC client's route is live, a header that names that client from another proxy address is dropped, so a second proxy cannot take the connection over.
 - UDP datagrams that the kernel coalesces (GRO) are inspected one by one and delivered to QUIC one by one, so a coalesced batch can mix clients.
 - go-proxyproto's `REQUIRE` policy has no Directive option and is not offered.
 - The `plugin/pkg/proxyproto` tests for `TLVListener`, `Addr` and the miekg/dns `ResponseWriter` boundary are not ported: Pharos passes the address and TLVs to the Handler directly. The TLV encoding, the session cache and the packet-header cases are ported as Rust unit tests in `pharos-server`.
