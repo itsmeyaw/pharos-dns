@@ -1,10 +1,13 @@
 //! ACME certificate management (RFC 8555) with the DNS-01 challenge for the `tls` Directive.
 
+mod der;
 pub(crate) mod http;
+mod jws;
 mod runtime;
 mod solver;
+mod store;
 
-pub(crate) use runtime::link;
+pub(crate) use runtime::{Runtime, link};
 pub use solver::Solver;
 
 use std::{

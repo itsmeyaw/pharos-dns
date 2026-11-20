@@ -27,6 +27,8 @@ serde_json = { version = "1", optional = true }
 regex = { version = "1", optional = true }
 regex-automata = "0.4"
 arc-swap = "1"
+aws-lc-rs = { version = "1", optional = true }
+base64 = { version = "0.22", optional = true }
 nix = { version = "0.31", features = ["net", "socket", "hostname"] }
 
 [dev-dependencies]
@@ -132,7 +134,7 @@ plugin-cache = []
 plugin-header = []
 plugin-dnssec = ["dep:pharos-dnssec"]
 dnssec-aws = ["plugin-dnssec", "dep:aws-config", "dep:aws-sdk-secretsmanager", "dep:serde", "dep:serde_json"]
-plugin-tls = []
+plugin-tls = ["dep:aws-lc-rs", "dep:base64", "dep:serde_json"]
 plugin-minimal = []
 plugin-template = ["dep:regex"]
 plugin-transfer = []

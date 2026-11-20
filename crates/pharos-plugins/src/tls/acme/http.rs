@@ -1,6 +1,17 @@
-//! The HTTPS client an ACME client needs: GET, HEAD and POST over one connection per request.
+//! The HTTP/1.1 client an ACME client needs: one connection per request, TLS verified against the configured roots.
 
-use std::str::FromStr;
+use std::{io, str::FromStr, sync::Arc, time::Duration};
+
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
+use hyper::{HeaderMap, Method, Request, client::conn::http1, header};
+use hyper_util::rt::TokioIo;
+use pharos_server::tls::{ClientConfig, ServerName, TlsConnector};
+use tokio::{net::TcpStream, time::timeout};
+
+// RFC 8555 §6.1: responses are small JSON documents or certificate chains; bound them against a hostile CA.
+const MAX_BODY: usize = 1 << 20;
+const TIMEOUT: Duration = Duration::from_secs(30);
 
 /// An `http` or `https` URL with a host.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -61,6 +72,130 @@ impl FromStr for Url {
             target,
         })
     }
+}
+
+impl Url {
+    fn authority(&self) -> String {
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        // RFC 9110 §7.2: the Host header omits the scheme's default port.
+        if self.port == if self.https { 443 } else { 80 } {
+            host
+        } else {
+            format!("{host}:{}", self.port)
+        }
+    }
+}
+
+/// A complete HTTP response.
+pub(crate) struct Response {
+    pub status: u16,
+    pub headers: HeaderMap,
+    pub body: Vec<u8>,
+}
+
+impl Response {
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
+        self.headers.get(name)?.to_str().ok()
+    }
+}
+
+/// Where ACME requests go and whom they trust.
+#[derive(Clone)]
+pub(crate) struct Http {
+    tls: Arc<ClientConfig>,
+}
+
+impl Http {
+    pub(crate) fn new(tls: Arc<ClientConfig>) -> Self {
+        Self { tls }
+    }
+
+    /// Send one request; redirects are not followed (RFC 8555 §6.1 names no redirect semantics).
+    pub(crate) async fn request(
+        &self,
+        method: Method,
+        url: &str,
+        content_type: Option<&str>,
+        body: Vec<u8>,
+    ) -> io::Result<Response> {
+        let url: Url = url.parse().map_err(|()| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("invalid URL {url:?}"))
+        })?;
+        timeout(TIMEOUT, self.exchange(method, &url, content_type, body))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "ACME request timed out"))?
+    }
+
+    async fn exchange(
+        &self,
+        method: Method,
+        url: &Url,
+        content_type: Option<&str>,
+        body: Vec<u8>,
+    ) -> io::Result<Response> {
+        let tcp = TcpStream::connect((url.host.as_str(), url.port)).await?;
+        let mut request = Request::builder()
+            .method(method)
+            .uri(&url.target)
+            .header(header::HOST, url.authority())
+            // RFC 8555 §6.1: clients SHOULD send a User-Agent identifying the implementation.
+            .header(
+                header::USER_AGENT,
+                concat!("pharos/", env!("CARGO_PKG_VERSION")),
+            )
+            .header(
+                header::ACCEPT,
+                "application/json, application/pem-certificate-chain",
+            );
+        if let Some(content_type) = content_type {
+            request = request.header(header::CONTENT_TYPE, content_type);
+        }
+        let request = request
+            .body(Full::new(Bytes::from(body)))
+            .map_err(io::Error::other)?;
+        let response = if url.https {
+            let name = ServerName::try_from(url.host.clone()).map_err(io::Error::other)?;
+            // RFC 8555 §6.1: ACME clients verify the server's certificate.
+            let stream = TlsConnector::from(Arc::clone(&self.tls))
+                .connect(name, tcp)
+                .await?;
+            send(TokioIo::new(stream), request).await?
+        } else {
+            send(TokioIo::new(tcp), request).await?
+        };
+        Ok(response)
+    }
+}
+
+async fn send<I>(io: I, request: Request<Full<Bytes>>) -> io::Result<Response>
+where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    let (mut sender, connection) = http1::handshake(io).await.map_err(io::Error::other)?;
+    tokio::spawn(connection);
+    let response = sender
+        .send_request(request)
+        .await
+        .map_err(io::Error::other)?;
+    let (parts, mut incoming) = response.into_parts();
+    let mut body = Vec::new();
+    while let Some(frame) = incoming.frame().await {
+        if let Ok(data) = frame.map_err(io::Error::other)?.into_data() {
+            if body.len() + data.len() > MAX_BODY {
+                return Err(io::Error::other("ACME response is too large"));
+            }
+            body.extend_from_slice(&data);
+        }
+    }
+    Ok(Response {
+        status: parts.status.as_u16(),
+        headers: parts.headers,
+        body,
+    })
 }
 
 #[cfg(test)]

@@ -2390,6 +2390,7 @@ dependencies = [
  "aws-config",
  "aws-lc-rs",
  "aws-sdk-secretsmanager",
+ "base64 0.22.1",
  "bytes",
  "criterion",
  "getrandom 0.2.17",
