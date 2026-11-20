@@ -8,12 +8,11 @@ use std::{
     time::Duration,
 };
 
-use bytes::Bytes;
 use pharos_proto::{Message, Name, NameRef, Rcode};
 use pharos_server::{Context, Next, Outcome, Plugin, metrics::GrpcMetrics};
 use tokio::time::{Instant, timeout_at};
 
-use client::{Client, Reply};
+use client::{Client, Pool, Reply};
 
 /// CoreDNS v1.15.0 plugin/grpc/setup.go `max`: the most Upstreams one Directive takes.
 pub(crate) const MAX_UPSTREAMS: usize = 15;
@@ -80,6 +79,7 @@ pub struct Grpc {
     policy: Policy,
     robin: AtomicU32,
     fallthrough: Vec<Name>,
+    pool: Pool,
 }
 
 impl std::fmt::Debug for Grpc {
@@ -164,15 +164,16 @@ impl Plugin for Grpc {
             return Outcome::Unanswered(Rcode::FORMERR);
         }
         // CoreDNS v1.15.0 plugin/grpc/proxy.go query: the Upstream gets the Query as modified by earlier Plugins.
-        let message = if cx.query.wire_changed() {
-            let mut wire = Vec::new();
-            if cx.query.copy_wire_checked(&mut wire).is_err() {
+        let mut request = self.pool.take();
+        let buffer = request.buffer();
+        if cx.query.wire_changed() {
+            if cx.query.copy_wire_checked(buffer).is_err() {
                 return Outcome::Unanswered(Rcode::FORMERR);
             }
-            Bytes::from(wire)
         } else {
-            Bytes::copy_from_slice(original)
-        };
+            buffer.extend_from_slice(original);
+        }
+        let message = request.wire();
         let deadline = Instant::now() + TIMEOUT;
         let mut buffer = [0; MAX_UPSTREAMS];
         let order = self
@@ -223,7 +224,8 @@ impl Plugin for Grpc {
             }
             if response.rcode() == Rcode::NXDOMAIN && fall {
                 // CoreDNS v1.15.0 plugin/grpc/grpc.go ServeDNS: `fallthrough` hands NXDOMAIN to the next Plugin.
-                let saved = cx.response.clone();
+                let mut saved = self.pool.take();
+                saved.buffer().extend_from_slice(cx.response);
                 cx.response.clear();
                 let outcome = next.run(cx).await;
                 if !matches!(outcome, Outcome::Error(pharos_server::Error::NoNextPlugin)) {
@@ -231,7 +233,7 @@ impl Plugin for Grpc {
                 }
                 // With no next Plugin the NXDOMAIN reply is the answer.
                 cx.response.clear();
-                cx.response.extend_from_slice(&saved);
+                cx.response.extend_from_slice(saved.contents());
             }
             // RFC 4035 §4.6: AD from an Upstream over a channel Pharos cannot vouch for is not trusted.
             cx.response[3] &= !0x20;

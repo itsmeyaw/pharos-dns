@@ -14,7 +14,7 @@ use pharos_server::{
 
 use super::{
     Grpc, MAX_UPSTREAMS, Policy, Upstream,
-    client::{Client, Target, Tls},
+    client::{Client, Pool, Target, Tls},
 };
 
 pub(crate) fn setup(
@@ -177,6 +177,7 @@ pub(super) fn parse(cursor: &mut Cursor<'_>, root: Option<&Path>) -> Result<Grpc
             .iter()
             .map(|name| domain(cursor, name))
             .collect::<Result<_, _>>()?,
+        pool: Pool::default(),
     })
 }
 

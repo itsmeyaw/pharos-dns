@@ -10,9 +10,13 @@ use std::{
     },
 };
 
-use bytes::{Buf, Bytes, buf::Chain};
+use bytes::{Buf, buf::Chain};
 use http_body_util::{BodyExt, Full};
-use hyper::{Request, StatusCode, Uri, client::conn::http2, header::CONTENT_TYPE};
+use hyper::{
+    Request, StatusCode, Uri,
+    client::conn::http2,
+    header::{CONTENT_TYPE, HeaderName, HeaderValue},
+};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use pharos_server::{
     grpc::{self, Code, FramePrefix},
@@ -24,8 +28,87 @@ use tokio::{
     time::Instant,
 };
 
-type Body = Full<Chain<FramePrefix, Bytes>>;
+type Body = Full<Chain<FramePrefix, Wire>>;
 type Sender = http2::SendRequest<Body>;
+
+/// The most buffers a [`Pool`] keeps, and the largest capacity of one it keeps.
+const POOL_BUFFERS: usize = 64;
+const POOL_CAPACITY: usize = 4096;
+
+/// A DNS Message queued for sending: a shared view of one [`Pool`] buffer, so a call needs no copy of it.
+#[derive(Clone)]
+pub(super) struct Wire {
+    buffer: Arc<Vec<u8>>,
+    position: usize,
+}
+
+impl Buf for Wire {
+    fn remaining(&self) -> usize {
+        self.buffer.len() - self.position
+    }
+
+    fn chunk(&self) -> &[u8] {
+        &self.buffer[self.position..]
+    }
+
+    fn advance(&mut self, count: usize) {
+        assert!(count <= self.remaining(), "advance past the end");
+        self.position += count;
+    }
+}
+
+/// Request buffers that outlive one call, so the warm path does not allocate for them.
+#[derive(Default)]
+pub(super) struct Pool(Mutex<Vec<Arc<Vec<u8>>>>);
+
+impl Pool {
+    pub(super) fn take(&self) -> Loan<'_> {
+        Loan {
+            pool: self,
+            buffer: lock(&self.0).pop(),
+        }
+    }
+}
+
+/// A buffer taken from a [`Pool`]; it goes back when no [`Wire`] of it is still in flight.
+pub(super) struct Loan<'a> {
+    pool: &'a Pool,
+    buffer: Option<Arc<Vec<u8>>>,
+}
+
+impl Loan<'_> {
+    /// The buffer to fill, emptied; a copy if a [`Wire`] still shares it.
+    pub(super) fn buffer(&mut self) -> &mut Vec<u8> {
+        let buffer = Arc::make_mut(self.buffer.get_or_insert_default());
+        buffer.clear();
+        buffer
+    }
+
+    pub(super) fn contents(&self) -> &[u8] {
+        self.buffer.as_deref().map_or(&[], Vec::as_slice)
+    }
+
+    pub(super) fn wire(&self) -> Wire {
+        Wire {
+            buffer: self.buffer.clone().unwrap_or_default(),
+            position: 0,
+        }
+    }
+}
+
+impl Drop for Loan<'_> {
+    fn drop(&mut self) {
+        // The connection may still hold the request; a buffer someone else owns is theirs to free.
+        if let Some(mut buffer) = self.buffer.take()
+            && Arc::get_mut(&mut buffer).is_some_and(|buffer| buffer.capacity() <= POOL_CAPACITY)
+        {
+            let mut kept = lock(&self.pool.0);
+            if kept.len() < POOL_BUFFERS {
+                kept.push(buffer);
+            }
+        }
+    }
+}
 
 /// Where an Upstream listens.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -75,6 +158,22 @@ fn invalid(message: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Fail
     Failure::Other(io::Error::new(io::ErrorKind::InvalidData, message))
 }
 
+/// A `grpc-timeout` of `millis` milliseconds, formatted on the stack.
+fn timeout_value(mut millis: u32) -> HeaderValue {
+    // PROTOCOL-HTTP2 "Timeout": ASCII digits, then the unit `m`.
+    let mut text = [b'm'; 9];
+    let mut start = text.len() - 1;
+    loop {
+        start -= 1;
+        text[start] = b'0' + (millis % 10) as u8;
+        millis /= 10;
+        if millis == 0 {
+            break;
+        }
+    }
+    HeaderValue::from_bytes(&text[start..]).expect("ASCII digits and a unit")
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -115,7 +214,7 @@ impl Client {
     /// Call `Query` with the DNS Message `message`; `out` receives the reply Message or is left empty.
     pub(super) async fn call(
         &self,
-        message: &Bytes,
+        message: &Wire,
         deadline: Instant,
         out: &mut Vec<u8>,
     ) -> io::Result<Reply> {
@@ -130,19 +229,22 @@ impl Client {
         }
     }
 
-    fn request(&self, message: &Bytes, deadline: Instant) -> Request<Body> {
+    fn request(&self, message: &Wire, deadline: Instant) -> Request<Body> {
         // PROTOCOL-HTTP2 "Timeout": whole milliseconds, at most eight digits; the call context carries the deadline.
         let millis = deadline
             .saturating_duration_since(Instant::now())
             .as_millis()
             .clamp(1, 99_999_999);
         Request::post(self.uri.clone())
-            .header(CONTENT_TYPE, grpc::CONTENT_TYPE)
+            .header(CONTENT_TYPE, HeaderValue::from_static(grpc::CONTENT_TYPE))
             // PROTOCOL-HTTP2 "Request-Headers": `te: trailers` is required.
-            .header("te", "trailers")
-            .header("grpc-timeout", format!("{millis}m"))
+            .header("te", HeaderValue::from_static("trailers"))
+            .header(
+                HeaderName::from_static("grpc-timeout"),
+                timeout_value(millis as u32),
+            )
             .body(Full::new(
-                FramePrefix::new(message.len()).chain(message.clone()),
+                FramePrefix::new(message.remaining()).chain(message.clone()),
             ))
             .expect("constant header names and numeric values")
     }
@@ -326,6 +428,29 @@ async fn read_reply(
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+
+    #[test]
+    fn timeouts_are_whole_milliseconds() {
+        for (millis, text) in [(1, "1m"), (5000, "5000m"), (99_999_999, "99999999m")] {
+            assert_eq!(timeout_value(millis), text);
+        }
+    }
+
+    #[test]
+    fn a_buffer_returns_to_the_pool_only_when_nothing_else_holds_it() {
+        let pool = Pool::default();
+        let mut loan = pool.take();
+        loan.buffer().extend_from_slice(b"abc");
+        let pointer = loan.wire().chunk().as_ptr();
+        drop(loan);
+        let mut again = pool.take();
+        assert_eq!(again.buffer().as_ptr(), pointer);
+        again.buffer().extend_from_slice(b"xyz");
+        let wire = again.wire();
+        drop(again);
+        assert!(lock(&pool.0).is_empty());
+        assert_eq!(wire.chunk(), b"xyz");
+    }
 
     async fn reaches(bind: &str, host: &str) {
         let Ok(listener) = TcpListener::bind(bind).await else {
