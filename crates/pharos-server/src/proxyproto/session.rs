@@ -1,6 +1,10 @@
 //! Bounded, expiring UDP session cache for Cloudflare Spectrum style PROXY headers.
 
-use std::{collections::HashMap, net::SocketAddr, time::Duration, time::Instant};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 
 // CoreDNS v1.15.0 plugin/pkg/proxyproto/udp_session.go udpSessionMaxEntries.
 pub const DEFAULT_MAX_SESSIONS: usize = 10_240;
@@ -17,7 +21,6 @@ struct Node {
 
 /// Maps the proxy-side address of a datagram flow to the client address its header named.
 pub struct Sessions {
-    ttl: Duration,
     capacity: usize,
     index: HashMap<SocketAddr, usize>,
     nodes: Vec<Node>,
@@ -28,9 +31,8 @@ pub struct Sessions {
 
 impl Sessions {
     #[must_use]
-    pub fn new(ttl: Duration, capacity: usize) -> Self {
+    pub fn new(capacity: usize) -> Self {
         Self {
-            ttl,
             capacity: capacity.max(1),
             index: HashMap::new(),
             nodes: Vec::new(),
@@ -51,8 +53,14 @@ impl Sessions {
     }
 
     /// Insert or refresh the session of `key`; a full cache evicts its least recently used entry.
-    pub fn store(&mut self, key: SocketAddr, source: SocketAddr, tlv: &str, now: Instant) {
-        let expires = now + self.ttl;
+    pub fn store(
+        &mut self,
+        key: SocketAddr,
+        (source, tlv): (SocketAddr, &str),
+        now: Instant,
+        ttl: Duration,
+    ) {
+        let expires = now + ttl;
         if let Some(&at) = self.index.get(&key) {
             let node = &mut self.nodes[at];
             node.source = source;
@@ -94,6 +102,7 @@ impl Sessions {
         &mut self,
         key: SocketAddr,
         now: Instant,
+        ttl: Duration,
         tlv: &mut String,
     ) -> Option<SocketAddr> {
         let at = *self.index.get(&key)?;
@@ -101,7 +110,7 @@ impl Sessions {
             self.remove(at);
             return None;
         }
-        self.nodes[at].expires = now + self.ttl;
+        self.nodes[at].expires = now + ttl;
         self.touch(at);
         let node = &self.nodes[at];
         tlv.clear();
@@ -150,19 +159,25 @@ impl Sessions {
 mod tests {
     use super::*;
 
+    const TTL: Duration = Duration::from_millis(50);
+
     fn addr(text: &str) -> SocketAddr {
         text.parse().unwrap()
     }
 
+    fn put(sessions: &mut Sessions, key: &str, source: &str, now: Instant) {
+        sessions.store(addr(key), (addr(source), ""), now, TTL);
+    }
+
     fn lookup(sessions: &mut Sessions, key: &str, now: Instant) -> Option<SocketAddr> {
-        sessions.lookup(addr(key), now, &mut String::new())
+        sessions.lookup(addr(key), now, TTL, &mut String::new())
     }
 
     #[test]
     fn stored_session_is_found() {
         let now = Instant::now();
-        let mut sessions = Sessions::new(Duration::from_secs(1), DEFAULT_MAX_SESSIONS);
-        sessions.store(addr("10.0.0.1:5000"), addr("192.168.1.1:12345"), "", now);
+        let mut sessions = Sessions::new(DEFAULT_MAX_SESSIONS);
+        put(&mut sessions, "10.0.0.1:5000", "192.168.1.1:12345", now);
         assert_eq!(
             lookup(&mut sessions, "10.0.0.1:5000", now),
             Some(addr("192.168.1.1:12345"))
@@ -171,15 +186,15 @@ mod tests {
 
     #[test]
     fn lookup_misses_on_an_empty_cache() {
-        let mut sessions = Sessions::new(Duration::from_secs(1), DEFAULT_MAX_SESSIONS);
+        let mut sessions = Sessions::new(DEFAULT_MAX_SESSIONS);
         assert_eq!(lookup(&mut sessions, "10.0.0.1:5000", Instant::now()), None);
     }
 
     #[test]
     fn expired_session_is_missing_and_released() {
         let now = Instant::now();
-        let mut sessions = Sessions::new(Duration::from_millis(50), DEFAULT_MAX_SESSIONS);
-        sessions.store(addr("10.0.0.1:5000"), addr("192.168.1.1:12345"), "", now);
+        let mut sessions = Sessions::new(DEFAULT_MAX_SESSIONS);
+        put(&mut sessions, "10.0.0.1:5000", "192.168.1.1:12345", now);
         let later = now + Duration::from_millis(100);
         assert_eq!(lookup(&mut sessions, "10.0.0.1:5000", later), None);
         assert!(sessions.is_empty());
@@ -188,8 +203,8 @@ mod tests {
     #[test]
     fn lookup_refreshes_the_expiry() {
         let now = Instant::now();
-        let mut sessions = Sessions::new(Duration::from_millis(50), DEFAULT_MAX_SESSIONS);
-        sessions.store(addr("10.0.0.1:5000"), addr("192.168.1.1:12345"), "", now);
+        let mut sessions = Sessions::new(DEFAULT_MAX_SESSIONS);
+        put(&mut sessions, "10.0.0.1:5000", "192.168.1.1:12345", now);
         assert!(
             lookup(
                 &mut sessions,
@@ -212,12 +227,12 @@ mod tests {
     #[test]
     fn store_refreshes_the_expiry_and_replaces_the_source() {
         let now = Instant::now();
-        let mut sessions = Sessions::new(Duration::from_millis(50), DEFAULT_MAX_SESSIONS);
-        sessions.store(addr("10.0.0.1:5000"), addr("192.168.1.1:1"), "", now);
-        sessions.store(
-            addr("10.0.0.1:5000"),
-            addr("192.168.1.2:2"),
-            "",
+        let mut sessions = Sessions::new(DEFAULT_MAX_SESSIONS);
+        put(&mut sessions, "10.0.0.1:5000", "192.168.1.1:1", now);
+        put(
+            &mut sessions,
+            "10.0.0.1:5000",
+            "192.168.1.2:2",
             now + Duration::from_millis(40),
         );
         assert_eq!(
@@ -234,10 +249,11 @@ mod tests {
     #[test]
     fn custom_capacity_caps_the_cache() {
         let now = Instant::now();
-        let mut sessions = Sessions::new(Duration::from_secs(1), 5);
+        let mut sessions = Sessions::new(5);
         for port in 0..10 {
             let key = SocketAddr::from(([10, 0, 0, 1], port));
-            sessions.store(key, SocketAddr::from(([1, 1, 1, 1], port)), "", now);
+            let source = SocketAddr::from(([1, 1, 1, 1], port));
+            sessions.store(key, (source, ""), now, TTL);
         }
         assert_eq!(sessions.len(), 5);
     }
@@ -245,10 +261,10 @@ mod tests {
     #[test]
     fn full_cache_evicts_the_least_recently_used_session() {
         let now = Instant::now();
-        let mut sessions = Sessions::new(Duration::from_secs(60), 2);
-        sessions.store(addr("10.0.0.1:1"), addr("1.1.1.1:1"), "", now);
-        sessions.store(addr("10.0.0.2:2"), addr("2.2.2.2:2"), "", now);
-        sessions.store(addr("10.0.0.3:3"), addr("3.3.3.3:3"), "", now);
+        let mut sessions = Sessions::new(2);
+        put(&mut sessions, "10.0.0.1:1", "1.1.1.1:1", now);
+        put(&mut sessions, "10.0.0.2:2", "2.2.2.2:2", now);
+        put(&mut sessions, "10.0.0.3:3", "3.3.3.3:3", now);
         assert_eq!(lookup(&mut sessions, "10.0.0.1:1", now), None);
         assert!(lookup(&mut sessions, "10.0.0.2:2", now).is_some());
         assert!(lookup(&mut sessions, "10.0.0.3:3", now).is_some());
@@ -257,11 +273,11 @@ mod tests {
     #[test]
     fn lookup_protects_a_session_from_eviction() {
         let now = Instant::now();
-        let mut sessions = Sessions::new(Duration::from_secs(60), 2);
-        sessions.store(addr("10.0.0.1:1"), addr("1.1.1.1:1"), "", now);
-        sessions.store(addr("10.0.0.2:2"), addr("2.2.2.2:2"), "", now);
+        let mut sessions = Sessions::new(2);
+        put(&mut sessions, "10.0.0.1:1", "1.1.1.1:1", now);
+        put(&mut sessions, "10.0.0.2:2", "2.2.2.2:2", now);
         assert!(lookup(&mut sessions, "10.0.0.1:1", now).is_some());
-        sessions.store(addr("10.0.0.3:3"), addr("3.3.3.3:3"), "", now);
+        put(&mut sessions, "10.0.0.3:3", "3.3.3.3:3", now);
         assert!(lookup(&mut sessions, "10.0.0.1:1", now).is_some());
         assert_eq!(lookup(&mut sessions, "10.0.0.2:2", now), None);
     }
@@ -269,14 +285,10 @@ mod tests {
     #[test]
     fn released_slots_are_reused() {
         let now = Instant::now();
-        let mut sessions = Sessions::new(Duration::from_secs(60), 1);
+        let mut sessions = Sessions::new(1);
         for port in 0..100 {
-            sessions.store(
-                SocketAddr::from(([10, 0, 0, 1], port)),
-                addr("1.1.1.1:1"),
-                "",
-                now,
-            );
+            let key = SocketAddr::from(([10, 0, 0, 1], port));
+            sessions.store(key, (addr("1.1.1.1:1"), ""), now, TTL);
         }
         assert_eq!((sessions.len(), sessions.nodes.len()), (1, 1));
     }
@@ -284,15 +296,15 @@ mod tests {
     #[test]
     fn lookup_copies_the_tlv_hex() {
         let now = Instant::now();
-        let mut sessions = Sessions::new(Duration::from_secs(1), DEFAULT_MAX_SESSIONS);
+        let mut sessions = Sessions::new(DEFAULT_MAX_SESSIONS);
         sessions.store(
             addr("10.0.0.1:5000"),
-            addr("192.168.1.1:1"),
-            "ea0001ff",
+            (addr("192.168.1.1:1"), "ea0001ff"),
             now,
+            TTL,
         );
         let mut tlv = String::from("stale");
-        sessions.lookup(addr("10.0.0.1:5000"), now, &mut tlv);
+        sessions.lookup(addr("10.0.0.1:5000"), now, TTL, &mut tlv);
         assert_eq!(tlv, "ea0001ff");
     }
 }
