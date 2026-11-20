@@ -231,6 +231,10 @@
 
 - [https Plugin notes](../crates/pharos-plugins/src/https/README.md)
 
+## https3
+
+- [https3 Plugin notes](../crates/pharos-plugins/src/https3/README.md)
+
 ## tls
 
 - [tls Plugin notes](../crates/pharos-plugins/src/tls/README.md)
