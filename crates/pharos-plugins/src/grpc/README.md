@@ -15,6 +15,7 @@
 - AD is cleared on every reply (RFC 4035 §4.6, as for `forward`'s encrypted Upstreams); CoreDNS preserves it.
 - Building a request and reading its reply allocates in hyper and `http` (header map, URI and message copies), so the warm path is not allocation-free.
 - Metrics `pharos_grpc_requests_total{to}`, `pharos_grpc_responses_total{rcode,to}` and `pharos_grpc_request_duration_seconds{to}` replace the `coredns_` series. A call that errors is not counted, as in CoreDNS. The `to` label is the normalized socket address (`127.0.0.1:53`, `[::1]:53`) or `unix://PATH`, where CoreDNS keeps the text as configured. The response counter's help text repeats CoreDNS's ("Counter of requests made per upstream.").
+- Differential scenarios are skipped: the CoreDNS reference binary has no gRPC Upstream to compare against without a shared stub, and the behaviour is pinned by the ported setup, policy and proxy tests plus the stub and `grpc_server` Listener tests in `tests/functional/grpc.rs`.
 - Tracing spans are not created (the `trace` Plugin is not implemented).
 
 ## Sources
