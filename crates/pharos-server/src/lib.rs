@@ -45,6 +45,7 @@ pub use server::{Chain, Server};
 pub use startup::startup_domains;
 mod tcp;
 pub use tcp::write_tcp_frame;
+pub mod tls;
 pub mod transfer;
 mod udp;
 pub use udp::reserve_descriptors;
