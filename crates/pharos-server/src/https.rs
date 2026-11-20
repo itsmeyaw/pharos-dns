@@ -53,7 +53,7 @@ impl Default for HttpsOptions {
     }
 }
 
-enum Chunk {
+pub(crate) enum Chunk {
     Text(&'static [u8]),
     Message(Pooled),
 }
@@ -200,16 +200,22 @@ async fn respond<H: Handler>(
     let (parts, body) = request.into_parts();
     let mut query = connection.pool.take();
     let result = answer(connection, &parts, body, &mut query).await;
+    let (head, chunk) = reply(result);
+    if let Some(counters) = &connection.status {
+        counters.count(head.status());
+    }
+    head.map(|()| Reply(Some(chunk)))
+}
+
+/// The status, header fields and body of the HTTP response to a DoH request, shared by every HTTP Transport.
+pub(crate) fn reply(result: Result<Pooled, StatusCode>) -> (Response<()>, Chunk) {
     let status = result
         .as_ref()
         .map_or_else(|status| *status, |_| StatusCode::OK);
-    if let Some(counters) = &connection.status {
-        counters.count(status);
-    }
-    let mut response = Response::new(Reply(None));
+    let mut response = Response::new(());
     *response.status_mut() = status;
     let headers = response.headers_mut();
-    match result {
+    let chunk = match result {
         Ok(message) => {
             // RFC 8484 §4.2.2: a DNS Response is application/dns-message with an explicit freshness lifetime.
             let now = SystemTime::now()
@@ -220,7 +226,7 @@ async fn respond<H: Handler>(
                 CACHE_CONTROL,
                 doh::cache_control(doh::max_age(&message, now)),
             );
-            *response.body_mut() = Reply(Some(Chunk::Message(message)));
+            Chunk::Message(message)
         }
         Err(status) => {
             // CoreDNS v1.15.0 server_https.go: net/http's http.Error text for each failure.
@@ -234,10 +240,10 @@ async fn respond<H: Handler>(
                 HeaderValue::from_static("text/plain; charset=utf-8"),
             );
             headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
-            *response.body_mut() = Reply(Some(Chunk::Text(text)));
+            Chunk::Text(text)
         }
-    }
-    response
+    };
+    (response, chunk)
 }
 
 async fn answer<H: Handler>(
@@ -250,21 +256,29 @@ async fn answer<H: Handler>(
         Source::Get(value) => doh::decode_get(value, query)?,
         Source::Post => read_body(body, query, connection.read).await?,
     }
+    dispatch(
+        &connection.handler,
+        connection.peer,
+        &connection.pool,
+        query,
+    )
+    .await
+}
+
+/// Run a DNS Query received over HTTP through the Plugin Chain, or name the status that rejects it.
+pub(crate) async fn dispatch<H: Handler>(
+    handler: &Arc<H>,
+    peer: SocketAddr,
+    pool: &Arc<Pool>,
+    query: &[u8],
+) -> Result<Pooled, StatusCode> {
     // CoreDNS v1.15.0 server_https.go ServeHTTP: an unparsable or rejected Message is a 400.
     if !doh::accept(query) {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let mut response = connection.pool.take();
+    let mut response = pool.take();
     // RFC 8484 §4.2.1: every DNS Response, including SERVFAIL, travels in a 2xx response; no Response is a 500.
-    match H::handle_shared(
-        &connection.handler,
-        query,
-        connection.peer,
-        Protocol::Tcp,
-        &mut response,
-    )
-    .await
-    {
+    match H::handle_shared(handler, query, peer, Protocol::Tcp, &mut response).await {
         Action::Respond => Ok(response),
         Action::Drop | Action::Stream(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
