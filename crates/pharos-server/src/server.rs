@@ -140,6 +140,8 @@ pub struct Server<C> {
     pub tls: Option<crate::tls::ServerTls>,
     /// Connection limits and response counters of an `https://` Listener.
     pub https: crate::HttpsOptions,
+    /// Limits of a `grpc://` Listener.
+    pub grpc: crate::GrpcOptions,
     /// Limits of a `quic://` Listener.
     pub quic: crate::QuicOptions,
     pub logger: fn(Error),
@@ -253,6 +255,7 @@ impl<C: Chain> Server<C> {
                 }),
                 ..crate::HttpsOptions::default()
             },
+            grpc: crate::GrpcOptions::default(),
             quic: crate::QuicOptions::default(),
             logger: log_error,
             metrics,
@@ -303,6 +306,9 @@ impl<C: Chain> Handler for Server<C> {
     }
     fn https(&self) -> crate::HttpsOptions {
         self.https.clone()
+    }
+    fn grpc(&self) -> crate::GrpcOptions {
+        self.grpc
     }
     fn quic_options(&self) -> crate::QuicOptions {
         self.quic
@@ -388,6 +394,7 @@ impl<C: Chain> crate::SelfLookupServer for Server<C> {
             tcp_options: self.tcp_options,
             tls: self.tls.clone(),
             https: self.https.clone(),
+            grpc: self.grpc,
             quic: self.quic,
             logger: self.logger,
             metrics: self.metrics.clone(),

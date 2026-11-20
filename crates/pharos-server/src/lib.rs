@@ -28,6 +28,8 @@ mod conn;
 pub mod doh;
 pub mod doq_client;
 pub mod grpc;
+mod grpc_listener;
+pub use grpc_listener::GrpcOptions;
 pub mod http;
 mod https;
 pub use https::HttpsOptions;
@@ -858,6 +860,10 @@ pub trait Handler: Send + Sync + 'static {
     fn https(&self) -> HttpsOptions {
         HttpsOptions::default()
     }
+    /// Connection and stream limits of a `grpc://` Listener.
+    fn grpc(&self) -> GrpcOptions {
+        GrpcOptions::default()
+    }
     /// Resource limits of a `quic://` Listener.
     fn quic_options(&self) -> QuicOptions {
         QuicOptions::default()
@@ -1018,6 +1024,23 @@ impl Listener {
             address,
             stop,
             tasks: vec![https::spawn(tcp, handler, receiver)],
+            udp_stop,
+            udp_tasks: Vec::new(),
+            shed: false,
+        })
+    }
+
+    /// Bind a TCP Listener that serves DNS over gRPC; it has no UDP sockets.
+    pub async fn bind_grpc<H: Handler>(address: SocketAddr, handler: H) -> io::Result<Self> {
+        let tcp = bind_tcp(address).await?;
+        let address = tcp.local_addr()?;
+        let (stop, receiver) = watch::channel(false);
+        let (udp_stop, _) = watch::channel(false);
+        let handler = Arc::new(handler);
+        Ok(Self {
+            address,
+            stop,
+            tasks: vec![grpc_listener::spawn(tcp, handler, receiver)],
             udp_stop,
             udp_tasks: Vec::new(),
             shed: false,
@@ -1515,7 +1538,11 @@ impl ListenerRegistry {
         if desired.iter().any(|key| {
             !matches!(
                 key.transport,
-                Transport::Dns | Transport::Tls | Transport::Https | Transport::Quic
+                Transport::Dns
+                    | Transport::Tls
+                    | Transport::Https
+                    | Transport::Grpc
+                    | Transport::Quic
             )
         }) {
             return Err(io::Error::new(
@@ -1565,6 +1592,7 @@ impl ListenerRegistry {
             let bound = match key.transport {
                 Transport::Tls => Listener::bind_tls(key.address, handler_for_listener).await,
                 Transport::Https => Listener::bind_https(key.address, handler_for_listener).await,
+                Transport::Grpc => Listener::bind_grpc(key.address, handler_for_listener).await,
                 Transport::Quic => Listener::bind_quic(key.address, handler_for_listener).await,
                 _ => Listener::bind(key.address, handler_for_listener).await,
             };
@@ -1721,6 +1749,9 @@ impl<H: Handler> Handler for Swappable<H> {
     }
     fn https(&self) -> HttpsOptions {
         self.0.load().https()
+    }
+    fn grpc(&self) -> GrpcOptions {
+        self.0.load().grpc()
     }
     fn quic_options(&self) -> QuicOptions {
         self.0.load().quic_options()
