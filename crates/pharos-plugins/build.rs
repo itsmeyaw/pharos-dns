@@ -11,7 +11,6 @@ fn config_only(name: &str) -> bool {
             | "debug"
             | "bind"
             | "multisocket"
-            | "tls"
             | "https"
             | "grpc_server"
             | "https3"
@@ -42,6 +41,14 @@ fn registered_handler(name: &str) -> bool {
     !config_only(name) || name == "view"
 }
 
+// A `tls` Directive without ACME only configures Listeners; with ACME it answers challenges for the whole process.
+fn registered(name: &str) -> String {
+    match name {
+        "tls" => "self.r#tls.as_ref().is_some_and(tls::Tls::answers_challenges)".to_owned(),
+        _ => format!("self.r#{name}.is_some()"),
+    }
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=plugin.cfg");
     println!("cargo:rustc-check-cfg=cfg(pharos_special_use)");
@@ -57,7 +64,9 @@ fn main() {
             env::var_os(feature).map(|_| name)
         })
         .collect();
-    let special_use_enabled = enabled.iter().any(|name| registered_handler(name));
+    let special_use_enabled = enabled
+        .iter()
+        .any(|name| registered_handler(name) && *name != "tls");
     if special_use_enabled {
         println!("cargo:rustc-cfg=pharos_special_use");
     }
@@ -279,7 +288,7 @@ fn main() {
                 .iter()
                 .skip(i + 1)
                 .filter(|name| registered_handler(name))
-                .map(|name| format!("self.r#{name}.is_some()"))
+                .map(|name| registered(name))
                 .collect::<Vec<_>>()
                 .join(" || ");
             let has_next = if tail.is_empty() { "false" } else { &tail };
@@ -311,7 +320,7 @@ fn main() {
     code.push_str("impl pharos_server::Chain for Chain {\n#[inline]\nfn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { Chain::serve(self, cx) }\nfn is_empty(&self) -> bool { true");
     for name in &enabled {
         if registered_handler(name) {
-            write!(code, " && self.r#{name}.is_none()").unwrap();
+            write!(code, " && !({})", registered(name)).unwrap();
         }
     }
     code.push_str(
@@ -319,7 +328,7 @@ fn main() {
     );
     for name in &enabled {
         if registered_handler(name) {
-            writeln!(code, "if self.r#{name}.is_some() {{ visit({name:?}); }}").unwrap();
+            writeln!(code, "if {} {{ visit({name:?}); }}", registered(name)).unwrap();
         }
     }
     code.push_str("}\n");

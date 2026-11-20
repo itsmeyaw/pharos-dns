@@ -1,6 +1,11 @@
 //! ACME certificate management (RFC 8555) with the DNS-01 challenge for the `tls` Directive.
 
 pub(crate) mod http;
+mod runtime;
+mod solver;
+
+pub(crate) use runtime::link;
+pub use solver::Solver;
 
 use std::{
     io,
@@ -51,7 +56,7 @@ impl Options {
 #[derive(Debug)]
 pub struct Entry {
     pub options: Options,
-    key: String,
+    pub(crate) key: String,
     pub(crate) slot: Arc<CertSlot>,
     server: ServerTls,
 }

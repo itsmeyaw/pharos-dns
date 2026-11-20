@@ -658,6 +658,10 @@ pub fn servers_with_registry(
     let ready_state = Arc::new(ready::State::default());
     #[cfg(feature = "plugin-ready")]
     let mut ready_addresses = std::collections::BTreeSet::new();
+    #[cfg(feature = "plugin-tls")]
+    let mut blocks = blocks;
+    #[cfg(feature = "plugin-tls")]
+    let _acme = tls::acme::link(&mut blocks)?;
     #[cfg(feature = "plugin-health")]
     let mut health_addresses: Vec<(String, std::time::Duration)> = Vec::new();
     #[cfg(feature = "plugin-ready")]
