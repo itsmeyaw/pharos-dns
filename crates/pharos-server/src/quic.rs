@@ -8,7 +8,7 @@ use std::{
     io,
     net::{Ipv4Addr, SocketAddr},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -27,7 +27,11 @@ use tokio::{
 };
 
 use crate::{
-    Action, Handler, TcpOptions, conn::Pool, metrics::TransportStatus, proxyproto::quic::Socket,
+    Action, Handler, TcpOptions,
+    conn::Pool,
+    metrics::TransportStatus,
+    pool::{MESSAGE_CAPACITY, Stash},
+    proxyproto::quic::Socket,
     tls::ServerTls,
 };
 
@@ -50,9 +54,10 @@ pub(crate) enum Kind {
     Doh3,
 }
 
-/// Keep at most this many scratch buffer pairs, each no larger than `MAX_POOLED_CAPACITY`.
+/// Keep at most this many scratch buffer pairs, in at most `MAX_POOLED_BYTES`; a pair may hold a whole
+/// 65,535-octet Query and Response.
 const MAX_POOLED: usize = 64;
-const MAX_POOLED_CAPACITY: usize = 8192;
+const MAX_POOLED_BYTES: usize = MAX_POOLED * 16 * 1024;
 
 /// RFC 9114 §6.2.1, RFC 9204 §4.2: the control stream and the QPACK encoder and decoder streams.
 const MIN_UNI_STREAMS: u64 = 3;
@@ -228,23 +233,26 @@ struct Shared {
 }
 
 /// Scratch buffers for a Query and its Response, reused across streams.
-struct Buffers(Mutex<Vec<(Vec<u8>, Vec<u8>)>>);
+struct Buffers(Stash<(Vec<u8>, Vec<u8>)>);
 
 impl Buffers {
+    fn new() -> Self {
+        Self(Stash::new(
+            MAX_POOLED,
+            2 * MESSAGE_CAPACITY,
+            MAX_POOLED_BYTES,
+        ))
+    }
+
     fn take(&self) -> (Vec<u8>, Vec<u8>) {
-        self.0.lock().unwrap().pop().unwrap_or_default()
+        self.0.take().unwrap_or_default()
     }
 
     fn put(&self, mut pair: (Vec<u8>, Vec<u8>)) {
-        if pair.0.capacity().max(pair.1.capacity()) > MAX_POOLED_CAPACITY {
-            return;
-        }
         pair.0.clear();
         pair.1.clear();
-        let mut pool = self.0.lock().unwrap();
-        if pool.len() < MAX_POOLED {
-            pool.push(pair);
-        }
+        let size = pair.0.capacity() + pair.1.capacity();
+        self.0.put(pair, size);
     }
 }
 
@@ -291,7 +299,7 @@ pub(crate) fn spawn<H: Handler>(
         let state = Arc::new(Connections {
             active: AtomicUsize::new(0),
             pending: Arc::new(AtomicUsize::new(0)),
-            buffers: Buffers(Mutex::new(Vec::new())),
+            buffers: Buffers::new(),
             pool: Arc::default(),
         });
         let mut connections = JoinSet::new();
@@ -601,4 +609,23 @@ async fn answer<H: Handler>(stream: &mut Stream<H>, buffers: &mut (Vec<u8>, Vec<
         let _ = timeout(stream.tcp.write, stream.send.stopped()).await;
     }
     count(metrics, NO_ERROR);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // RFC 9250 §4.2: a Query and Response of 65,535 octets must not allocate again on the next stream.
+    #[test]
+    fn buffers_keep_the_pair_of_a_maximum_size_message() {
+        let buffers = Buffers::new();
+        let mut pair = buffers.take();
+        pair.0.resize(usize::from(u16::MAX), 0);
+        pair.1.resize(usize::from(u16::MAX) + 2, 0);
+        buffers.put(pair);
+        let again = buffers.take();
+        assert!(again.0.capacity() >= usize::from(u16::MAX));
+        assert!(again.1.capacity() >= usize::from(u16::MAX) + 2);
+        assert!(again.0.is_empty() && again.1.is_empty());
+    }
 }

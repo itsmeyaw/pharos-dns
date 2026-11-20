@@ -40,6 +40,7 @@ pub mod logging;
 pub mod metrics;
 mod outcome;
 mod panic;
+pub mod pool;
 mod process_metrics;
 pub mod proxyproto;
 mod quic;

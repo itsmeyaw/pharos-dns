@@ -9,7 +9,7 @@ use std::{
     ops::{Deref, DerefMut},
     pin::Pin,
     sync::{
-        Arc, Mutex, PoisonError,
+        Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -24,24 +24,29 @@ use tokio::{
 };
 use tokio_rustls::server::TlsStream;
 
-use crate::{Action, Handler, Protocol, TcpOptions, proxyproto::Prefixed};
+use crate::{
+    Action, Handler, Protocol, TcpOptions,
+    pool::{MESSAGE_CAPACITY, Stash},
+    proxyproto::Prefixed,
+};
 
-// Buffers kept for reuse are bounded in count and size so a burst of large Responses cannot pin memory.
+// Buffers kept for reuse are bounded in count and in total size, so a burst of large Responses cannot
+// pin memory; each may hold a whole 65,535-octet Message.
 const POOL_BUFFERS: usize = 128;
-const POOL_BUFFER_CAPACITY: usize = 16 * 1024;
+const POOL_BYTES: usize = POOL_BUFFERS * 16 * 1024;
 
 /// Reusable Query and Response buffers, so a Query allocates only while the pool is still filling.
-#[derive(Default)]
-pub(crate) struct Pool(Mutex<Vec<Vec<u8>>>);
+pub(crate) struct Pool(Stash<Vec<u8>>);
+
+impl Default for Pool {
+    fn default() -> Self {
+        Self(Stash::new(POOL_BUFFERS, MESSAGE_CAPACITY, POOL_BYTES))
+    }
+}
 
 impl Pool {
     pub(crate) fn take(self: &Arc<Self>) -> Pooled {
-        let buffer = self
-            .0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .pop()
-            .unwrap_or_default();
+        let buffer = self.0.take().unwrap_or_default();
         Pooled {
             buffer,
             position: 0,
@@ -86,14 +91,9 @@ impl Buf for Pooled {
 impl Drop for Pooled {
     fn drop(&mut self) {
         let mut buffer = std::mem::take(&mut self.buffer);
-        if buffer.capacity() > POOL_BUFFER_CAPACITY {
-            return;
-        }
         buffer.clear();
-        let mut pool = self.pool.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if pool.len() < POOL_BUFFERS {
-            pool.push(buffer);
-        }
+        let size = buffer.capacity();
+        self.pool.0.put(buffer, size);
     }
 }
 
@@ -320,5 +320,22 @@ pub(crate) async fn drive<C: Future<Output = hyper::Result<()>>>(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // RFC 1035 §4.2.2: a Message of 65,535 octets must not allocate again on the next Query.
+    #[test]
+    fn pool_keeps_the_buffer_of_a_maximum_size_message() {
+        let pool = Arc::new(Pool::default());
+        let mut buffer = pool.take();
+        buffer.resize(usize::from(u16::MAX), 0);
+        drop(buffer);
+        let again = pool.take();
+        assert!(again.capacity() >= usize::from(u16::MAX));
+        assert!(again.is_empty());
     }
 }
