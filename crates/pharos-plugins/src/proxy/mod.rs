@@ -1,7 +1,8 @@
 //! Upstream DNS exchange. Independent cache shards hold idle connections only;
 //! no lock or manager task is held while a Query waits for its Response.
 //! DNS-over-TLS Upstreams keep one idle connection cache like TCP; the dial
-//! timeout bounds the TCP dial plus the TLS handshake.
+//! timeout bounds the TCP dial plus the TLS handshake. DNS-over-QUIC Upstreams
+//! share one QUIC connection and open a stream per Query (see [`doq`]).
 //! CoreDNS's `forward` performs the `prefer_udp` TC retry; Pharos does it here,
 //! so a `forward` caller must not retry the same truncated Response again.
 //! UDP source ports: the OS picks a random port for each new socket, a socket
@@ -9,6 +10,8 @@
 //! `UDP_MAX_IDLE` idle UDP sockets are retained per Upstream. Sockets in flight
 //! are bounded only by concurrent Queries, never by a per-Query allocation.
 
+pub mod doq;
+pub use doq::Doq;
 pub mod health;
 pub use health::{Health, HealthConfig};
 
@@ -129,9 +132,12 @@ pub enum Transport {
     Tcp,
     /// DNS over TLS (RFC 7858); chosen by the Upstream, never by `force_tcp` or `prefer_udp`.
     Tls,
+    /// DNS over QUIC (RFC 9250); chosen by the Upstream and never pooled like the others.
+    Quic,
 }
 
 impl Transport {
+    /// Transports whose idle connections are pooled; `Quic` keeps its own connection.
     const COUNT: usize = 3;
 
     const fn index(self) -> usize {
@@ -479,8 +485,9 @@ fn sanitize_edns(
         let code = u16::from_be_bytes([wire[read], wire[read + 1]]);
         let data_len = usize::from(u16::from_be_bytes([wire[read + 2], wire[read + 3]]));
         let option_len = 4 + data_len;
-        if code == 11 && transport == Transport::Udp {
+        if code == 11 && matches!(transport, Transport::Udp | Transport::Quic) {
             // RFC 7828 §3.2.1: Never send TCP keepalive over UDP.
+            // RFC 9250 §5.5.2: DoQ Queries carry no edns-tcp-keepalive option.
             read += option_len;
             continue;
         }
@@ -581,6 +588,7 @@ pub struct Proxy {
     average_dial_nanos: AtomicI64,
     source_address: Option<IpAddr>,
     tls: Option<Tls>,
+    quic: Option<Arc<Doq>>,
     metrics: Option<Metrics>,
     health: Health,
 }
@@ -610,6 +618,7 @@ impl Proxy {
             average_dial_nanos: AtomicI64::new(15_000_000_000),
             source_address: None,
             tls: None,
+            quic: None,
             metrics: None,
             health: Health::new(address, 2),
         }
@@ -618,6 +627,9 @@ impl Proxy {
     /// Set the maximum idle time before an Upstream connection is discarded.
     pub fn set_expire(&mut self, expire: Duration) {
         self.expire = expire;
+        if let Some(doq) = &self.quic {
+            doq.set_expire(expire);
+        }
         self.next_sweep
             .store(self.sweep_deadline(), Ordering::Relaxed);
     }
@@ -667,6 +679,9 @@ impl Proxy {
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
         self.health.shutdown();
+        if let Some(doq) = &self.quic {
+            doq.stop();
+        }
         for (protocol, shard) in self
             .shards
             .iter()
@@ -692,11 +707,17 @@ impl Proxy {
     /// Set maximum connection age from creation; zero means unlimited.
     pub fn set_max_age(&mut self, max_age: Duration) {
         self.max_age = max_age;
+        if let Some(doq) = &self.quic {
+            doq.set_max_age(max_age);
+        }
     }
 
     /// Set the Response read timeout (two seconds by default).
     pub fn set_read_timeout(&mut self, read_timeout: Duration) {
         self.read_timeout = read_timeout;
+        if let Some(doq) = &self.quic {
+            doq.set_read_timeout(read_timeout);
+        }
     }
 
     fn dial_timeout(&self) -> Duration {
@@ -775,6 +796,26 @@ impl Proxy {
         self.tls.is_some()
     }
 
+    /// Reach this Upstream over DNS-over-QUIC, whatever Transport a Query asks for.
+    /// Call before `set_metrics` so connection reuse is counted under `quic`.
+    pub fn set_quic(&mut self, tls: Tls) {
+        let doq = Doq::new(self.address, tls);
+        doq.set_expire(self.expire);
+        doq.set_max_age(self.max_age);
+        doq.set_read_timeout(self.read_timeout);
+        doq.set_source_address(self.source_address);
+        let mut config = self.health.config();
+        config.doq = Some(Arc::clone(&doq));
+        self.health = Health::with_config(config);
+        self.quic = Some(doq);
+    }
+
+    /// Whether Queries to this Upstream travel over DNS-over-QUIC.
+    #[must_use]
+    pub fn is_quic(&self) -> bool {
+        self.quic.is_some()
+    }
+
     /// Bind new Upstream and health-check connections to this local IP.
     pub fn set_source_address(&mut self, source: Option<IpAddr>) {
         if source == self.source_address {
@@ -787,6 +828,9 @@ impl Proxy {
             idle.store(0, Ordering::Relaxed);
         }
         self.source_address = source;
+        if let Some(doq) = &self.quic {
+            doq.set_source_address(source);
+        }
         let mut config = self.health.config();
         config.source_address = source;
         self.health = Health::with_config(config);
@@ -798,6 +842,10 @@ impl Proxy {
         let mut config = self.health.config();
         config.metrics = Some(proxy.clone());
         self.health = Health::with_config(config);
+        if let Some(doq) = &self.quic {
+            // CoreDNS v1.15.0 plugin/pkg/proxy/doq.go acquire: DoQ connection reuse counts as `quic`.
+            doq.set_cache(proxy.connection_cache("quic"));
+        }
         self.metrics = Some(Metrics {
             cache: [
                 ("udp", false),
@@ -806,7 +854,8 @@ impl Proxy {
                 ("tcp-tls", true),
             ]
             .map(|(proto, encrypted)| {
-                (encrypted == self.tls.is_some()).then(|| proxy.connection_cache(proto))
+                (self.quic.is_none() && encrypted == self.tls.is_some())
+                    .then(|| proxy.connection_cache(proto))
             }),
             durations: (0..4096).map(|_| OnceLock::new()).collect(),
             proxy,
@@ -821,6 +870,9 @@ impl Proxy {
         }
         if config.tls.is_none() {
             config.tls.clone_from(&self.tls);
+        }
+        if config.doq.is_none() {
+            config.doq.clone_from(&self.quic);
         }
         if let Some(metrics) = &self.metrics {
             config.metrics = Some(metrics.proxy.clone());
@@ -843,6 +895,14 @@ impl Proxy {
             return Err(Error::Stopped);
         }
         self.sweep();
+        if let Some(doq) = &self.quic {
+            // CoreDNS v1.15.0 plugin/pkg/proxy/connect.go Connect: a DoQ Upstream always uses DoQ.
+            let result = self.exchange_quic(doq, query, response).await;
+            if matches!(result, Err(Error::Io(_))) {
+                self.health.start();
+            }
+            return result;
+        }
         // RFC 7766 §5: DNS forwarders must support both UDP and TCP transport.
         // CoreDNS v1.15.0 plugin/pkg/proxy/connect.go: a TLS-configured Upstream always uses TLS.
         let selected = if self.tls.is_some() {
@@ -1014,43 +1074,14 @@ impl Proxy {
             response[3] = flags[1];
             response[6..12].fill(0);
         }
-        let (close_after, ttl_normalization) = {
-            let answer = Message::parse(&response[..length])
-                .map_err(|_| Error::Io(io::ErrorKind::InvalidData.into()))?;
-            if let Some(metrics) = &self.metrics {
-                let code = answer.rcode().0;
-                // shortcut: first observation of an RCODE allocates; pre-register codes if cold traffic matters.
-                metrics.durations[usize::from(code)]
-                    .get_or_init(|| metrics.proxy.request_duration(&Rcode(code).to_string()))
-                    .observe(start.elapsed().as_secs_f64());
-            }
-            // RFC 5452 §4.2: Response Question must match the outstanding Query.
-            let same_questions = request.question_count() == answer.question_count()
-                && request
-                    .questions()
-                    .zip(answer.questions())
-                    .all(|(a, b)| a.name == b.name && a.qtype == b.qtype && a.qclass == b.qclass);
-            if !answer.qr() || !same_questions || !same_ecs(&request, &answer) {
-                return Err(Error::Mismatch(length));
-            }
-            let ttl_normalization = rrsets_ttl_normalization(&answer, &response[..length])
-                .map_err(|_| Error::Io(io::ErrorKind::InvalidData.into()))?;
-            (keepalive_zero(&answer), ttl_normalization)
-        };
-        if ttl_normalization.changed
-            && !apply_rrset_ttl_normalization(&mut response[..length], ttl_normalization.records)
-        {
-            return Err(Error::Io(io::ErrorKind::InvalidData.into()));
-        }
-        // RFC 1035 §4.1.1: the response ID matches the original query ID.
-        response[..2].copy_from_slice(&query[..2]);
+        let close_after = self.finish_response(&request, query, response, length, start)?;
         // RFC 5452 §9.2: retire a UDP socket after its use budget so its source port changes.
         let next_uses = next_use_count(transport, uses);
         let spent = transport == Transport::Udp && next_uses >= self.udp_max_uses;
         let max_idle = match (transport, self.max_idle_conns) {
             (Transport::Udp, 0) => UDP_MAX_IDLE,
             (Transport::Udp, max) => max.min(UDP_MAX_IDLE),
-            (Transport::Tcp | Transport::Tls, max) => max,
+            (Transport::Tcp | Transport::Tls | Transport::Quic, max) => max,
         };
         if !spent {
             let mut queue = self.shards[protocol][shard].lock().unwrap();
@@ -1075,6 +1106,82 @@ impl Proxy {
             len: length,
             local_addr,
             transport,
+        })
+    }
+    /// Check an Upstream Response against its Query, then normalize it for the client.
+    /// Returns whether the Upstream asked to close the connection after this Response.
+    fn finish_response(
+        &self,
+        request: &Message<'_>,
+        query: &[u8],
+        response: &mut [u8],
+        length: usize,
+        start: Instant,
+    ) -> Result<bool, Error> {
+        let (close_after, ttl_normalization) = {
+            let answer = Message::parse(&response[..length])
+                .map_err(|_| Error::Io(io::ErrorKind::InvalidData.into()))?;
+            if let Some(metrics) = &self.metrics {
+                let code = answer.rcode().0;
+                // shortcut: first observation of an RCODE allocates; pre-register codes if cold traffic matters.
+                metrics.durations[usize::from(code)]
+                    .get_or_init(|| metrics.proxy.request_duration(&Rcode(code).to_string()))
+                    .observe(start.elapsed().as_secs_f64());
+            }
+            // RFC 5452 §4.2: Response Question must match the outstanding Query.
+            let same_questions = request.question_count() == answer.question_count()
+                && request
+                    .questions()
+                    .zip(answer.questions())
+                    .all(|(a, b)| a.name == b.name && a.qtype == b.qtype && a.qclass == b.qclass);
+            if !answer.qr() || !same_questions || !same_ecs(request, &answer) {
+                return Err(Error::Mismatch(length));
+            }
+            let ttl_normalization = rrsets_ttl_normalization(&answer, &response[..length])
+                .map_err(|_| Error::Io(io::ErrorKind::InvalidData.into()))?;
+            (keepalive_zero(&answer), ttl_normalization)
+        };
+        if ttl_normalization.changed
+            && !apply_rrset_ttl_normalization(&mut response[..length], ttl_normalization.records)
+        {
+            return Err(Error::Io(io::ErrorKind::InvalidData.into()));
+        }
+        // RFC 1035 §4.1.1: the response ID matches the original query ID.
+        response[..2].copy_from_slice(&query[..2]);
+        Ok(close_after)
+    }
+
+    // RFC 9250 §4.2: DoQ sends one Query on its own stream and reads one Response from it.
+    async fn exchange_quic(
+        &self,
+        doq: &Doq,
+        query: &[u8],
+        response: &mut [u8],
+    ) -> Result<Exchange, Error> {
+        let start = Instant::now();
+        let request = Message::parse(query).map_err(|_| Error::InvalidRequest)?;
+        if query.len() > response.len() || query.len() > u16::MAX as usize {
+            return Err(Error::InvalidRequest);
+        }
+        // CoreDNS v1.15.0 plugin/pkg/proxy/doq.go exchange: zone transfers need a multi-message Response DoQ here lacks.
+        if request.question_count() == 1
+            && request
+                .questions()
+                .any(|question| matches!(question.qtype, Type::AXFR | Type::IXFR))
+        {
+            return Err(Error::UnsupportedRequest);
+        }
+        response[..query.len()].copy_from_slice(query);
+        // RFC 9250 §4.2.1: the DoQ Message ID is zero.
+        response[..2].fill(0);
+        let opt_range = opt_rdata_range(&request, query);
+        let outgoing_len = sanitize_edns(response, query.len(), Transport::Quic, false, opt_range);
+        let reply = doq.exchange(response, outgoing_len, None).await?;
+        self.finish_response(&request, query, response, reply.len, start)?;
+        Ok(Exchange {
+            len: reply.len,
+            local_addr: reply.local_addr,
+            transport: Transport::Quic,
         })
     }
 }

@@ -33,6 +33,8 @@ pub struct HealthConfig {
     pub source_address: Option<IpAddr>,
     /// Probe over DNS-over-TLS instead of UDP or TCP.
     pub tls: Option<super::Tls>,
+    /// Probe over DNS-over-QUIC, sharing the Upstream's connection.
+    pub doq: Option<std::sync::Arc<super::Doq>>,
     pub max_fails: u32,
     pub interval: Duration,
     pub metrics: Option<ProxyMetrics>,
@@ -50,6 +52,7 @@ impl HealthConfig {
             force_tcp: false,
             source_address: None,
             tls: None,
+            doq: None,
             max_fails,
             interval: Duration::from_millis(500),
             metrics: None,
@@ -234,7 +237,11 @@ impl Drop for Health {
 async fn check(config: &HealthConfig) -> io::Result<()> {
     // RFC 5452 §9.2: outgoing queries use unpredictable IDs.
     let mut id = [0; 2];
-    getrandom::getrandom(&mut id).map_err(|_| io::Error::other("random ID generation failed"))?;
+    // RFC 9250 §4.2.1: DoQ Queries carry Message ID zero.
+    if config.doq.is_none() {
+        getrandom::getrandom(&mut id)
+            .map_err(|_| io::Error::other("random ID generation failed"))?;
+    }
     let mut query = Vec::with_capacity(12 + config.domain.as_wire().len() + 4);
     query.extend_from_slice(&id);
     // RFC 1035 §4.1.1: RD requests recursive query processing.
@@ -246,7 +253,22 @@ async fn check(config: &HealthConfig) -> io::Result<()> {
     // RFC 1035 §3.2.4: IN has class 1.
     query.extend_from_slice(&[0, 2, 0, 1]);
 
-    let response = if let Some(tls) = &config.tls {
+    let response = if let Some(doq) = &config.doq {
+        // CoreDNS v1.15.0 plugin/pkg/proxy/health.go doqHc: retry once when the peer closed a cached connection.
+        let mut wire = vec![0; usize::from(u16::MAX)];
+        wire[..query.len()].copy_from_slice(&query);
+        let mut attempts = 0;
+        let len = loop {
+            match doq.exchange(&mut wire, query.len(), Some(IO_TIMEOUT)).await {
+                Ok(reply) => break reply.len,
+                Err(super::Error::CachedClosed) if attempts < 1 => attempts += 1,
+                Err(super::Error::Io(error)) => return Err(error),
+                Err(error) => return Err(io::Error::other(error)),
+            }
+        };
+        wire.truncate(len);
+        wire
+    } else if let Some(tls) = &config.tls {
         // CoreDNS v1.15.0 plugin/pkg/proxy/health.go: a DoT probe's dial timeout covers the handshake; force_tcp is moot.
         let mut stream = timeout(
             DIAL_TIMEOUT,

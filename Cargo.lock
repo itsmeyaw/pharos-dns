@@ -2322,6 +2322,7 @@ dependencies = [
  "pharos-kv",
  "pharos-proto",
  "pharos-server",
+ "quinn",
  "regex",
  "regex-automata",
  "serde",

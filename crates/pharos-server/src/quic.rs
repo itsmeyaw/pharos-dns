@@ -26,17 +26,20 @@ use tokio::{
 
 use crate::{Action, Handler, Protocol, TcpOptions, metrics::TransportStatus, tls::ServerTls};
 
+// RFC 9250 §4.1.1: the ALPN token of DoQ is "doq".
+pub(crate) const ALPN: &[u8] = b"doq";
+
 // RFC 9250 §8.4: DOQ_NO_ERROR, DOQ_INTERNAL_ERROR and DOQ_PROTOCOL_ERROR.
-const NO_ERROR: VarInt = VarInt::from_u32(0);
+pub(crate) const NO_ERROR: VarInt = VarInt::from_u32(0);
 const INTERNAL_ERROR: VarInt = VarInt::from_u32(1);
-const PROTOCOL_ERROR: VarInt = VarInt::from_u32(2);
+pub(crate) const PROTOCOL_ERROR: VarInt = VarInt::from_u32(2);
 
 /// Keep at most this many scratch buffer pairs, each no larger than `MAX_POOLED_CAPACITY`.
 const MAX_POOLED: usize = 64;
 const MAX_POOLED_CAPACITY: usize = 8192;
 
 /// One DoQ Message is at most 65535 octets plus its two-octet length (RFC 9250 §4.2).
-const STREAM_WINDOW: u32 = 66 * 1024;
+pub(crate) const STREAM_WINDOW: u32 = 66 * 1024;
 
 /// Resource limits of a `quic://` Listener; defaults match CoreDNS v1.15.0.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -25,6 +25,7 @@ use tokio::{
 
 mod admission;
 pub mod doh;
+pub mod doq_client;
 pub mod http;
 mod https;
 pub use https::HttpsOptions;

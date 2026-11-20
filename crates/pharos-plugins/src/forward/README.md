@@ -6,15 +6,16 @@
 
 - Plain UDP and TCP Upstream exchange is available for `forward`.
 - DNS-over-TLS Upstreams (`tls://HOST[:853]`) share the `pharos_server::tls` client configuration with the `tls` Plugin. The dial timeout bounds the TCP dial plus the TLS handshake, health checks probe over TLS, and idle connections follow `expire` and `max_idle_conns` under the `tcp-tls` metrics label.
-- `force_tcp` and `prefer_udp` do not affect `tls://` Upstreams; as in CoreDNS they always use TLS. Health checks over TLS ignore `force_tcp`.
+- DNS-over-QUIC Upstreams (`quic://HOST[:853]`, RFC 9250) take the same `tls` and `tls_servername` options and `IP%NAME` zone as `tls://`, negotiate ALPN `doq` over TLS 1.3, and share one QUIC connection per Upstream with one stream per Query (Message ID zero upstream, the client's ID restored). The connection is replaced when it closes, idles past `expire` or outlives `max_age`; abandoned Queries reset only their own stream (`DOQ_REQUEST_CANCELLED`) and a protocol error closes the connection (`DOQ_PROTOCOL_ERROR`). `edns-tcp-keepalive` is stripped and AXFR/IXFR are refused. Connection reuse counts under the `quic` metrics label and health checks probe over DoQ. `max_idle_conns` does not apply because there is one connection, and the QUIC idle timeout is the larger of 30s, `expire` and `read_timeout`. Deferred and, as in CoreDNS, not done: EDNS padding of Queries (RFC 9250 §5.4), rejecting port 53 (RFC 9250 §4.1.1), and keeping a TSIG-signed Query valid after its ID becomes zero.
+- `force_tcp` and `prefer_udp` do not affect `tls://` or `quic://` Upstreams; as in CoreDNS they always use TLS. Health checks over TLS ignore `force_tcp`.
 - The proxy retries a truncated UDP Response over TCP only when `prefer_udp` is set, as CoreDNS's `forward` does.
 - Idle sockets are swept across shards at most once per expiry interval on Query traffic. Unlike CoreDNS’s periodic cleanup, an idle Proxy retains expired sockets until another Query or shutdown.
 - Upstream TSIG Messages retain their original ID rather than rewriting the signed Message.
 - Proxy metric RCODE series are initialized on first observation, allocating once per distinct RCODE.
 - Connections rotate FIFO within each worker shard rather than in one global FIFO.
-- `quic://`, `https://`, `grpc://` and `unix://` Upstreams fail setup rather than silently downgrade; only `tls://` is encrypted.
-- `tls` takes `CA`, `CERT KEY` or `CERT KEY CA`; relative paths join `root`. Without arguments the system roots verify the server. A `tls://IP%NAME` zone and `tls_servername` are mutually exclusive for one Upstream, and the name defaults to the Upstream's IP address.
-- TLS names are lowercased, so `tls://IP%Name` and `tls://IP%name` are one Upstream. CoreDNS keeps the case.
+- `https://`, `grpc://` and `unix://` Upstreams fail setup rather than silently downgrade; only `tls://` and `quic://` are encrypted.
+- `tls` takes `CA`, `CERT KEY` or `CERT KEY CA`; relative paths join `root`. Without arguments the system roots verify the server. A `tls://IP%NAME` or `quic://IP%NAME` zone and `tls_servername` are mutually exclusive for one Upstream, and the name defaults to the Upstream's IP address.
+- TLS names are lowercased, so `tls://IP%Name` and `tls://IP%name` (likewise `quic://`) are one Upstream. CoreDNS keeps the case.
 - Hostname Upstreams resolve at setup using the system resolver or the configured `resolver`.
 - `doh_method` has no effect on plain DNS.
 - Special names `test.` and RFC 6303 reverse domains defer to the Chain's terminal NXDOMAIN unless a matching stanza opts into upstream lookup with `allow_special` or an explicit special-use `from` Zone. `invalid.` always gets terminal NXDOMAIN; explicit `forward .invalid` setup is rejected (RFC 6761 §§6.1, 6.2, 6.4).
@@ -35,7 +36,7 @@
 - Mismatched Upstream responses are discarded and retried; if no usable answer arrives, the client receives SERVFAIL, not FORMERR.
 - Configured resolver lookups follow CNAMEs up to 16 hops and retry TC responses over TCP.
 - Verified TSIG is stripped before forwarding. The forwarder clears AD on the response before it is TSIG-signed for the client.
-- AD is cleared by default on unsigned Responses over plain UDP/TCP and TLS Upstreams (RFC 4035 §4.6). This differs from CoreDNS, which preserves upstream AD; the trust-policy decision is tracked in [issue #110](https://github.com/itsmeyaw/pharos-dns/issues/110). TSIG Responses stay unchanged so their MAC remains valid.
+- AD is cleared by default on unsigned Responses over plain UDP/TCP and TLS and QUIC Upstreams (RFC 4035 §4.6). This differs from CoreDNS, which preserves upstream AD; the trust-policy decision is tracked in [issue #110](https://github.com/itsmeyaw/pharos-dns/issues/110). TSIG Responses stay unchanged so their MAC remains valid.
 - ECS response FAMILY, SOURCE and ADDRESS must match when ECS is returned; mismatch discards the response and tries the next upstream. Longer SCOPE is accepted. ECS SCOPE is zeroed in upstream Queries. TSIG-signed Queries are not rewritten and do not get the ECS REFUSED retry, preserving their MAC.
 - Mixed-TTL RRsets are normalized to the lowest TTL per RFC 2181 §5.2. Repeated RRsets across sections are relayed unchanged; RFC 2181 §5.5 says they SHOULD NOT be repeated.
 - EDNS option 11 is removed from unsigned UDP Queries. On TCP, Query option data is zero-length; a response TIMEOUT of zero closes the connection after that response. TSIG-signed Queries remain byte-identical, so option 11 is not rewritten on that path.

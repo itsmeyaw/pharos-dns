@@ -190,6 +190,8 @@ mod forward {
     mod forward_debug;
     #[path = "forward_ported.rs"]
     mod forward_ported;
+    #[path = "forward_quic.rs"]
+    mod forward_quic;
     #[path = "forward_tls.rs"]
     mod forward_tls;
 }
@@ -310,6 +312,8 @@ mod prometheus {
 mod proxy {
     #[path = "proxy.rs"]
     mod cases;
+    #[path = "proxy_quic.rs"]
+    mod proxy_quic;
     #[path = "proxy_throughput.rs"]
     mod proxy_throughput;
     #[path = "proxy_tls.rs"]

@@ -216,6 +216,7 @@ impl Forward {
                     setup::Target::Tls {
                         address,
                         server_name,
+                        quic,
                     } => {
                         let client = match &tls_config {
                             Some(client) => client.clone(),
@@ -236,10 +237,13 @@ impl Forward {
                             .map_err(|_| cursor.error(format!("invalid TLS server name {name}")))?;
                         (
                             address,
-                            Some(proxy::Tls {
-                                config: client,
-                                server_name,
-                            }),
+                            Some((
+                                proxy::Tls {
+                                    config: client,
+                                    server_name,
+                                },
+                                quic,
+                            )),
                         )
                     }
                     setup::Target::Invalid(address) => {
@@ -251,8 +255,11 @@ impl Forward {
                     }
                 };
                 let mut proxy = Proxy::new(address);
-                if let Some(tls) = tls {
-                    proxy.set_tls(tls);
+                match tls {
+                    // RFC 9250 §4.1.1: a `quic://` Upstream speaks DoQ.
+                    Some((tls, true)) => proxy.set_quic(tls),
+                    Some((tls, false)) => proxy.set_tls(tls),
+                    None => {}
                 }
                 proxy.set_expire(config.expire);
                 proxy.set_max_age(config.max_age);
