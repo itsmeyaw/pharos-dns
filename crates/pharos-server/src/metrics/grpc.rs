@@ -10,6 +10,7 @@ use super::{
     Histogram, ResponseCounters, SortedSamples, TIME_BUCKETS, encode_histogram, header, rcode,
 };
 
+// CoreDNS v1.15.0 plugin/grpc/metrics.go: `requests_total`, `responses_total` and `request_duration_seconds` are labelled by `to`.
 #[derive(Default)]
 pub(super) struct GrpcRegistry(Mutex<BTreeMap<String, Arc<Upstream>>>);
 
@@ -24,6 +25,7 @@ struct Upstream {
 pub struct GrpcMetrics(Arc<Upstream>);
 
 impl GrpcRegistry {
+    // CoreDNS v1.15.0 plugin/grpc/proxy.go query: series are keyed by the Upstream's address text.
     pub(super) fn resolve(&self, to: &str) -> GrpcMetrics {
         GrpcMetrics(Arc::clone(
             self.0.lock().unwrap().entry(to.into()).or_insert_with(|| {
@@ -42,10 +44,12 @@ impl GrpcRegistry {
         for (to, upstream) in upstreams.iter() {
             let n = upstream.requests.load(Ordering::Relaxed);
             if n != 0 {
+                // CoreDNS v1.15.0 plugin/grpc/metrics.go RequestCount: `to` is the only label.
                 sorted.sample("grpc_requests_total", &[("to", to)], n);
             }
         }
         if !sorted.0.is_empty() {
+            // CoreDNS v1.15.0 plugin/grpc/metrics.go RequestCount: Help text.
             header(
                 out,
                 "grpc_requests_total",
@@ -66,6 +70,7 @@ impl GrpcRegistry {
             }
         }
         if !sorted.0.is_empty() {
+            // CoreDNS v1.15.0 plugin/grpc/metrics.go RcodeCount: Help text repeats RequestCount's.
             header(
                 out,
                 "grpc_responses_total",
@@ -77,6 +82,7 @@ impl GrpcRegistry {
         let mut sorted = SortedSamples::default();
         for (to, upstream) in upstreams.iter() {
             if upstream.duration.count() != 0 {
+                // CoreDNS v1.15.0 plugin/grpc/metrics.go RequestDuration: buckets are `plugin.TimeBuckets`.
                 let values = [("to", to.as_str())];
                 let mut text = String::new();
                 encode_histogram(
@@ -90,6 +96,7 @@ impl GrpcRegistry {
             }
         }
         if !sorted.0.is_empty() {
+            // CoreDNS v1.15.0 plugin/grpc/metrics.go RequestDuration: Help text.
             header(
                 out,
                 "grpc_request_duration_seconds",
@@ -103,6 +110,7 @@ impl GrpcRegistry {
 
 impl GrpcMetrics {
     /// Record one successful call that answered with `rcode` after `seconds`.
+    // CoreDNS v1.15.0 plugin/grpc/proxy.go query: the three series are updated together after a reply unpacks.
     pub fn observe(&self, rcode: u16, seconds: f64) {
         self.0.requests.fetch_add(1, Ordering::Relaxed);
         self.0.responses.increment(rcode);
