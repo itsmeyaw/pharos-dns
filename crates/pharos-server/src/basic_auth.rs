@@ -1,6 +1,10 @@
 //! HTTP basic authentication against bcrypt hashes, as the Prometheus exporter-toolkit does.
 
-use std::{collections::HashMap, io, sync::Mutex};
+use std::{
+    collections::HashMap,
+    io,
+    sync::{Arc, Mutex},
+};
 
 use aws_lc_rs::digest::{SHA256, digest};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -18,7 +22,7 @@ pub struct BasicAuth {
     /// SHA-256 of (user, hash, password) to the bcrypt verdict, so repeated scrapes skip bcrypt.
     cache: Mutex<HashMap<[u8; 32], bool>>,
     /// Only one bcrypt runs at a time: it is CPU intensive and must not starve other work.
-    serial: tokio::sync::Mutex<()>,
+    serial: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl BasicAuth {
@@ -37,7 +41,7 @@ impl BasicAuth {
         Ok(Self {
             users,
             cache: Mutex::new(HashMap::new()),
-            serial: tokio::sync::Mutex::new(()),
+            serial: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -60,9 +64,11 @@ impl BasicAuth {
         let verified = match cached {
             Some(verified) => verified,
             None => {
-                let _serial = self.serial.lock().await;
+                let serial = Arc::clone(&self.serial).lock_owned().await;
                 let hash = hash.to_owned();
                 let verified = tokio::task::spawn_blocking(move || {
+                    // The guard moves in so a cancelled request cannot free it while bcrypt still runs.
+                    let _serial = serial;
                     // Go's bcrypt rejects passwords over 72 bytes instead of truncating them.
                     bcrypt::non_truncating_verify(password, &hash).unwrap_or(false)
                 })

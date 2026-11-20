@@ -162,7 +162,11 @@ pub(crate) fn load(path: &Path) -> io::Result<Security> {
 fn is_zero(value: &Value) -> bool {
     match value {
         Value::Number(number) => number.as_f64() == Some(0.0),
-        Value::String(text) => matches!(text.as_str(), "0" | "0s"),
+        // Go time.ParseDuration: a zero number with an optional unit.
+        Value::String(text) => {
+            let number = text.trim_end_matches(['n', 'u', 'µ', 'μ', 'm', 's', 'h']);
+            number.parse::<f64>().is_ok_and(|number| number == 0.0)
+        }
         Value::Null => true,
         _ => false,
     }
@@ -519,6 +523,8 @@ mod tests {
     fn features_pharos_does_not_implement_fail_instead_of_being_ignored() {
         // web_config_rate_limiter_nonblocking.yaml is a no-op; one second needs a limiter.
         accepts("rate_limit:\n  interval: 0\n  burst: 0\n");
+        accepts("rate_limit:\n  interval: 0ns\n");
+        accepts("rate_limit:\n  interval: \"0m\"\n");
         assert_eq!(
             rejects("rate_limit:\n  interval: \"1s\"\n  burst: 0\n").kind(),
             ErrorKind::Unsupported

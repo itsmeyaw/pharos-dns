@@ -287,7 +287,8 @@ async fn validation_error_does_not_claim_address() {
 }
 
 #[tokio::test]
-async fn serve_error_releases_address() {
+async fn mismatched_key_does_not_claim_address() {
+    // Pharos loads the identity before binding, so unlike CoreDNS no serve error can follow a bind.
     // Valid YAML and readable files, but the key does not belong to the certificate.
     let dir = tempfile::tempdir().unwrap();
     let config = write_config(
