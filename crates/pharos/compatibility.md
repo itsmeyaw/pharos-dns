@@ -231,6 +231,7 @@
 ## proxyproto
 
 - [proxyproto Plugin notes](../crates/pharos-plugins/src/proxyproto/README.md)
+- PROXY headers apply to the `dns://`, `tls://`, `https://`, `grpc://`, `quic://` and `https3://` Listeners. TCP Transports read the header before the TLS handshake; the QUIC Transports strip it from datagrams before QUIC reads them, and a Spectrum style header-only first datagram needs `udp_session_tracking`.
 
 ## timeouts
 
