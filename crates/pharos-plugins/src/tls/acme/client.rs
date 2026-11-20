@@ -62,7 +62,8 @@ fn retry_delay(value: Option<&str>, now: SystemTime) -> Duration {
     })
 }
 
-// RFC 9110 §5.6.7: IMF-fixdate, e.g. `Sun, 06 Nov 1994 08:49:37 GMT`. The obsolete RFC 850 and asctime forms are not parsed.
+// RFC 9110 §5.6.7: IMF-fixdate, e.g. `Sun, 06 Nov 1994 08:49:37 GMT`.
+// shortcut: the obsolete RFC 850 and asctime forms are not parsed (RFC 9110 §5.6.7 tells recipients to accept them, but senders must not generate them, and ACME CAs do not); they poll after `POLL`.
 fn http_date(text: &str) -> Option<SystemTime> {
     let mut parts = text.split(' ');
     let (day_name, day, month, year, time, zone) = (
