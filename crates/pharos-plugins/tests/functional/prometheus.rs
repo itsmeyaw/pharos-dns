@@ -158,17 +158,6 @@ async fn metrics_bind_failure_is_reported() {
 }
 
 #[tokio::test]
-async fn unsupported_tls_never_starts_plain_http() {
-    let input = ".:1053 {\n prometheus 127.0.0.1:0 {\n tls config.yml\n}\n whoami\n}";
-    let blocks = parse("Corefile", input).unwrap();
-    let (_, lifecycle) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
-    assert_eq!(
-        lifecycle.run(Phase::Startup).await.unwrap_err().kind(),
-        std::io::ErrorKind::Unsupported
-    );
-}
-
-#[tokio::test]
 async fn empty_metrics_port_uses_ephemeral_port() {
     let input = ".:0 {\n prometheus localhost:\n whoami\n}";
     let blocks = parse("Corefile", input).unwrap();

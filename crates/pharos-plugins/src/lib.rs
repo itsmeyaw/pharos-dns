@@ -1244,14 +1244,12 @@ pub fn servers_with_registry(
                 if listener.lock().unwrap().is_some() {
                     return Ok(());
                 }
-                if tls_config.is_some() {
-                    // shortcut: exporter-toolkit TLS and authentication require a compatible configuration implementation.
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        "prometheus TLS configuration is not supported",
-                    ));
-                }
-                let server = pharos_server::http::Listener::bind_with_methods(
+                // exporter-toolkit v0.20.0 web.Validate: an invalid file fails before the address is bound.
+                let security = match &tls_config {
+                    Some(path) => prometheus::web_config::load(std::path::Path::new(path))?,
+                    None => pharos_server::http::Security::default(),
+                };
+                let server = pharos_server::http::Listener::bind_secured(
                     &address,
                     move |method, path| {
                         if path != "/metrics" {
@@ -1270,6 +1268,7 @@ pub fn servers_with_registry(
                         // RFC 9110 §5.6.3: Media-type parameter OWS uses one SP for readability.
                         Some((200, "text/plain; version=0.0.4; charset=utf-8", body))
                     },
+                    security,
                 )
                 .await?;
                 *listener.lock().unwrap() = Some(server);

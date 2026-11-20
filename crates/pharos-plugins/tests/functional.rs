@@ -306,6 +306,8 @@ mod prometheus {
     mod cases;
     #[path = "prometheus_setup.rs"]
     mod prometheus_setup;
+    #[path = "prometheus_tls.rs"]
+    mod prometheus_tls;
 }
 
 #[path = "functional"]
