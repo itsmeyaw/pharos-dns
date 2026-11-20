@@ -160,6 +160,13 @@
       "skillPath": "skills/rust-best-practices/SKILL.md",
       "computedHash": "7e12e68aa50152eb7ba9ea1f88ca5380c846ea0175f8ab6788bb79b7faf12ca0"
     },
+    "rust-perf": {
+      "source": "itsmeyaw/skills",
+      "commit": "236350d24a5b5351c6cad067982b33a9b3c79d69",
+      "sourceType": "github",
+      "skillPath": "skills/development/rust-perf/SKILL.md",
+      "computedHash": "a0934cea8afa77d502422da846a0ddd3c53154ffcd44b8d48e2d2777f3d115d1"
+    },
     "rust-testing": {
       "source": "affaan-m/ecc",
       "sourceType": "github",

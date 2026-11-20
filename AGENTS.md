@@ -1,8 +1,28 @@
+## Project Structure
+
+Cargo workspace (`crates/*` + `xtask`, `crates/pharos-proto/fuzz` is excluded).
+
+- `crates/pharos` - binary: the DNS server compatible with CoreDNS Corefiles.
+- `crates/pharos-corefile` - Corefile lexer and parser.
+- `crates/pharos-proto` - DNS wire format, names, records, zone files, TSIG, EDNS. Has `benches/` and `fuzz/`.
+- `crates/pharos-server` - listeners, Plugin Chain contract, metrics.
+- `crates/pharos-plugins` - CoreDNS-compatible Plugins, one folder per Plugin (ADR 0007). Order in `plugin.cfg`.
+- `crates/pharos-kubernetes` - Kubernetes API client used by the `kubernetes` Plugin.
+- `crates/pharos-dnssec` - DNSSEC signing.
+- `crates/pharos-kv` - small durable ordered key-value store.
+- `xtask/` - dev automation, including `e2e/`.
+- `tests/` - `differential/` (vs CoreDNS) and `fixtures/`.
+- `deploy/kubernetes/` - Kubernetes manifests. `Dockerfile` at the root.
+- `docs/` - `adr/` (decisions), `agents/` (agent skill config), plus `benchmarks.md`, `compatibility.md`, `conformance.md`.
+- Root: `GLOSSARY.md` (domain terms), `CODING_STANDARDS.md`, `MIGRATION.md`, `deny.toml`, `rust-toolchain.toml`.
+
+Each crate follows `src/` (code), `tests/` (integration tests), and `CHANGELOG.md`.
+
 ## Development
 
 - Use `caveman` skill, including for subagents.
 - Use `caveman-commit` skill for commit message.
-- Use `code-review` skills for review.
+- Use `code-review`, `rust-best-practices`, and `rust-perf` skills for review.
 - Use `rust-*` skills for implementation and test.
 - Commit in small functional changes.
 - Always add one-line comment citation to the standard for a logic. For example: `RFC 1034 §4.3.2: xxxxx`.
