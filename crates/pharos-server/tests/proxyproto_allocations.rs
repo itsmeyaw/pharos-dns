@@ -49,6 +49,10 @@ impl Handler for Probe {
         tlv: &str,
         response: &mut Vec<u8>,
     ) -> Action {
+        // Rust Future::poll: a pending Query must not prevent later slot reuse.
+        if query == b"slow" {
+            tokio::task::yield_now().await;
+        }
         let mut counts = self.counts.lock().unwrap();
         counts.0 += 1;
         if counts.0 == 101 {
@@ -72,7 +76,7 @@ fn header() -> Vec<u8> {
     wire
 }
 
-async fn measure(config: Config, header_first: bool, with_header: bool, expected: &'static [u8]) {
+async fn measure(config: Config, header_first: bool, with_header: bool, tlv: &'static [u8]) {
     let counts = Arc::new(Mutex::new((0, None, None)));
     let listener = Listener::bind(
         "127.0.0.1:0".parse().unwrap(),
@@ -96,22 +100,20 @@ async fn measure(config: Config, header_first: bool, with_header: bool, expected
         }
         let mut buf = [0; 64];
         // The client thread shares the global allocator, so it builds its datagram once.
-        let wire = if with_header {
-            [header(), b"query".to_vec()].concat()
-        } else {
-            b"query".to_vec()
+        let datagram = |payload: &[u8]| {
+            if with_header {
+                [header().as_slice(), payload].concat()
+            } else {
+                payload.to_vec()
+            }
         };
-        // A burst makes the worker retain several slots, as the plain UDP allocation test does.
-        for _ in 0..8 {
-            socket.send_to(&wire, address).unwrap();
-        }
-        for _ in 0..8 {
-            socket.recv_from(&mut buf).unwrap();
-        }
-        for _ in 0..201 {
-            socket.send_to(&wire, address).unwrap();
+        let sent = [datagram(b"slow"), datagram(b"query")];
+        let replied = [[b"slow", tlv].concat(), [b"query", tlv].concat()];
+        for index in 0..201 {
+            let kind = usize::from(index > 0);
+            socket.send_to(&sent[kind], address).unwrap();
             let (n, _) = socket.recv_from(&mut buf).unwrap();
-            assert_eq!(&buf[..n], expected);
+            assert_eq!(&buf[..n], replied[kind]);
         }
         let _ = done.send(());
     });
@@ -149,17 +151,17 @@ fn proxied(tracking: bool) -> Config {
 // Each Listener runs in its own test process: nextest isolates the global allocator counts.
 #[tokio::test(flavor = "current_thread")]
 async fn plain_datagrams_allocate_nothing_with_proxyproto_configured() {
-    measure(proxied(false), false, false, b"query").await;
+    measure(proxied(false), false, false, b"").await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn datagram_headers_allocate_nothing_per_query() {
-    measure(proxied(false), false, true, b"queryea000107").await;
+    measure(proxied(false), false, true, b"ea000107").await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn spectrum_sessions_allocate_nothing_per_query() {
-    measure(proxied(true), true, false, b"queryea000107").await;
+    measure(proxied(true), true, false, b"ea000107").await;
 }
 
 #[test]
