@@ -4,13 +4,13 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use pharos_server::{
     Action, Handler, ListenerKey, ListenerRegistry, Protocol, Transport,
-    proxyproto::{Config, Policy},
+    proxyproto::{Config, Policy, UdpTracking},
     tls::{ClientAuth, ClientOptions, ServerOptions, ServerTls, TlsConnector, client_config},
 };
 use rustls::pki_types::ServerName;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+    net::{TcpStream, UdpSocket},
     time::timeout,
 };
 
@@ -327,5 +327,125 @@ async fn tls_listener_serves_clients_that_send_no_header_under_use() {
             .unwrap()
             .starts_with("127.0.0.1:")
     );
+    registry.shutdown().await.unwrap();
+}
+
+async fn udp_client(address: SocketAddr) -> UdpSocket {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket.connect(address).await.unwrap();
+    socket
+}
+
+async fn udp_response(socket: &UdpSocket) -> Option<String> {
+    let mut buffer = [0; 512];
+    let length = timeout(Duration::from_millis(500), socket.recv(&mut buffer))
+        .await
+        .ok()?
+        .ok()?;
+    Some(String::from_utf8(buffer[..length].to_vec()).unwrap())
+}
+
+fn tracking(policy: Policy) -> Config {
+    let mut config = config(policy);
+    config.udp_tracking = Some(UdpTracking {
+        ttl: Duration::from_secs(30),
+        max_sessions: 100,
+    });
+    config
+}
+
+// PROXY protocol §2.2: a v2 DGRAM header precedes the payload of its datagram.
+#[tokio::test]
+async fn udp_header_sets_the_peer_and_the_tlv_for_its_datagram() {
+    let (registry, address) = listening(config(Policy::Use)).await;
+    let client = udp_client(address).await;
+    let wire = [v2(0x12, &[0xEA, 0, 2, 0xCA, 0xFE]), b"dns".to_vec()].concat();
+    client.send(&wire).await.unwrap();
+    assert_eq!(
+        udp_response(&client).await.as_deref(),
+        Some("192.0.2.1:12345|ea0002cafe")
+    );
+    client.send(b"dns").await.unwrap();
+    let response = udp_response(&client).await.unwrap();
+    assert!(response.starts_with("127.0.0.1:"), "{response}");
+    registry.shutdown().await.unwrap();
+}
+
+// Cloudflare Spectrum: the header-only first datagram opens a session for headerless ones.
+#[tokio::test]
+async fn udp_header_only_datagram_opens_a_session() {
+    let (registry, address) = listening(tracking(Policy::Use)).await;
+    let client = udp_client(address).await;
+    client.send(&v2(0x12, &[0xEA, 0, 1, 7])).await.unwrap();
+    assert_eq!(udp_response(&client).await, None);
+    for _ in 0..3 {
+        client.send(b"dns").await.unwrap();
+        assert_eq!(
+            udp_response(&client).await.as_deref(),
+            Some("192.0.2.1:12345|ea000107")
+        );
+    }
+    let other = udp_client(address).await;
+    other.send(b"dns").await.unwrap();
+    assert!(
+        udp_response(&other)
+            .await
+            .unwrap()
+            .starts_with("127.0.0.1:")
+    );
+    registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn udp_policies_decide_what_happens_to_a_header() {
+    let wire = [v2(0x12, &[]), b"dns".to_vec()].concat();
+    let (registry, address) = listening(config(Policy::Ignore)).await;
+    let client = udp_client(address).await;
+    client.send(&wire).await.unwrap();
+    assert!(
+        udp_response(&client)
+            .await
+            .unwrap()
+            .starts_with("127.0.0.1:")
+    );
+    registry.shutdown().await.unwrap();
+
+    let (registry, address) = listening(config(Policy::Reject)).await;
+    let client = udp_client(address).await;
+    client.send(&wire).await.unwrap();
+    assert_eq!(udp_response(&client).await, None);
+    client.send(b"dns").await.unwrap();
+    assert!(udp_response(&client).await.is_some());
+    registry.shutdown().await.unwrap();
+
+    let (registry, address) = listening(config(Policy::Skip)).await;
+    let client = udp_client(address).await;
+    client.send(&wire).await.unwrap();
+    assert!(
+        udp_response(&client)
+            .await
+            .unwrap()
+            .starts_with("127.0.0.1:")
+    );
+    registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn udp_malformed_headers_are_dropped_and_the_listener_keeps_serving() {
+    let (registry, address) = listening(config(Policy::Use)).await;
+    let client = udp_client(address).await;
+    let mut oversized = v2(0x12, &[]);
+    oversized[14..16].copy_from_slice(&u16::MAX.to_be_bytes());
+    for wire in [
+        [v1(), b"dns".to_vec()].concat(),
+        v2(0x12, &[])[..20].to_vec(),
+        [v2(0x11, &[]), b"dns".to_vec()].concat(),
+        oversized,
+    ] {
+        client.send(&wire).await.unwrap();
+        assert_eq!(udp_response(&client).await, None);
+    }
+    client.send(b"dns").await.unwrap();
+    assert!(udp_response(&client).await.is_some());
     registry.shutdown().await.unwrap();
 }
