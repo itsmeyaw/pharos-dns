@@ -9,8 +9,10 @@ use std::{
     },
 };
 
+mod grpc;
 mod kubernetes;
 mod template;
+pub use grpc::GrpcMetrics;
 pub use kubernetes::{KubernetesMetrics, KubernetesRequestMetrics};
 pub use template::{TemplateFailureMetrics, TemplateMetrics};
 
@@ -84,6 +86,7 @@ struct RegistryInner {
     reload_hash: Mutex<Option<String>>,
     kubernetes: KubernetesMetrics,
     template: template::TemplateRegistry,
+    grpc: grpc::GrpcRegistry,
 }
 
 #[derive(Default)]
@@ -645,6 +648,7 @@ impl Registry {
             reload_hash: Mutex::new(None),
             kubernetes: KubernetesMetrics::default(),
             template: template::TemplateRegistry::default(),
+            grpc: grpc::GrpcRegistry::default(),
         }))
     }
 
@@ -790,6 +794,11 @@ impl Registry {
         ))
     }
 
+    /// Resolve the counters of one gRPC Upstream before recording its calls.
+    pub fn grpc(&self, to: &str) -> GrpcMetrics {
+        self.0.grpc.resolve(to)
+    }
+
     /// Register and share forward's unlabelled counters.
     pub fn forward(&self) -> ForwardMetrics {
         self.0.forward_enabled.store(true, Ordering::Relaxed);
@@ -850,6 +859,7 @@ impl Registry {
     pub fn encode(&self, out: &mut String) {
         self.0.kubernetes.encode(out);
         self.0.template.encode(out);
+        self.0.grpc.encode(out);
         let shed = self.0.shed.lock().unwrap();
         if !shed.is_empty() {
             header(

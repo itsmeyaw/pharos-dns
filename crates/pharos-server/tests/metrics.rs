@@ -24,6 +24,7 @@ fn migration_table_matches_all_registry_metric_families() {
     proxy.connection_cache("udp").hit();
     proxy.connection_cache("udp").miss();
     proxy.healthcheck_failure();
+    registry.grpc("192.0.2.1:53").observe(0, 0.001);
     registry.forward();
     registry.local();
     registry.enable_health_metrics();
@@ -49,6 +50,30 @@ fn migration_table_matches_all_registry_metric_families() {
         .map(|name| format!("pharos_{name}"))
         .collect();
     assert_eq!(actual, documented.iter().map(String::as_str).collect());
+}
+
+// CoreDNS v1.15.0 plugin/grpc/metrics.go: three families labelled by upstream, the response counter also by RCODE.
+#[test]
+fn grpc_metrics_export_upstream_series() {
+    let registry = Registry::new("v", "r", "rust");
+    let upstream = registry.grpc("192.0.2.1:53");
+    upstream.observe(0, 0.00025);
+    upstream.observe(3, 0.001);
+    registry.grpc("192.0.2.1:53").observe(3, 0.001);
+    registry.grpc("unused:53");
+    let mut text = String::new();
+    registry.encode(&mut text);
+    for expected in [
+        "# HELP pharos_grpc_requests_total Counter of requests made per upstream.\n# TYPE pharos_grpc_requests_total counter\npharos_grpc_requests_total{to=\"192.0.2.1:53\"} 3\n",
+        "# TYPE pharos_grpc_responses_total counter\npharos_grpc_responses_total{rcode=\"NOERROR\",to=\"192.0.2.1:53\"} 1\npharos_grpc_responses_total{rcode=\"NXDOMAIN\",to=\"192.0.2.1:53\"} 2\n",
+        "# TYPE pharos_grpc_request_duration_seconds histogram\n",
+        "pharos_grpc_request_duration_seconds_bucket{to=\"192.0.2.1:53\",le=\"0.00025\"} 1\n",
+        "pharos_grpc_request_duration_seconds_bucket{to=\"192.0.2.1:53\",le=\"0.001\"} 3\n",
+        "pharos_grpc_request_duration_seconds_count{to=\"192.0.2.1:53\"} 3\n",
+    ] {
+        assert!(text.contains(expected), "missing {expected:?}\n{text}");
+    }
+    assert!(!text.contains("unused:53"));
 }
 
 #[test]
