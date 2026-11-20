@@ -4,7 +4,7 @@
 
 ## root
 
-- The README's TLS Listener example (`tls://` with relative `tls` paths) resolves against `root` like CoreDNS.
+- The README's TLS Listener example (`tls://` with relative `tls` paths) resolves against `root` like CoreDNS, as do the `tls` paths of a `quic://` Server Block.
 
 ## Sources
 
