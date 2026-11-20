@@ -1,6 +1,9 @@
 //! The RFC 8555 client flow for one certificate: account, order, DNS-01 authorization, finalize, download.
 
-use std::{io, time::Duration};
+use std::{
+    io,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use aws_lc_rs::digest::{SHA256, digest};
 use hyper::Method;
@@ -44,15 +47,69 @@ pub(crate) struct Issued {
     pub key: Vec<u8>,
 }
 
-// RFC 8555 §7.5.1: a server may send Retry-After; RFC 9110 §10.2.3 allows delay-seconds, honoured up to 30 s.
-// shortcut: the HTTP-date form is ignored and the 1 s default used, add date parsing if a CA sends it.
+// RFC 8555 §7.5.1: a server may send Retry-After; RFC 9110 §10.2.3 allows delay-seconds or an HTTP-date, honoured up to 30 s.
 fn retry_after_of(response: &Response) -> Duration {
-    response
-        .header("retry-after")
-        .and_then(|seconds| seconds.parse().ok())
-        .map_or(POLL, |seconds: u64| {
-            Duration::from_secs(seconds.clamp(1, 30))
-        })
+    retry_delay(response.header("retry-after"), SystemTime::now())
+}
+
+fn retry_delay(value: Option<&str>, now: SystemTime) -> Duration {
+    let Some(value) = value else { return POLL };
+    let seconds = value.parse().ok().or_else(|| {
+        http_date(value).map(|at| at.duration_since(now).map_or(0, |wait| wait.as_secs()))
+    });
+    seconds.map_or(POLL, |seconds: u64| {
+        Duration::from_secs(seconds.clamp(1, 30))
+    })
+}
+
+// RFC 9110 §5.6.7: IMF-fixdate, e.g. `Sun, 06 Nov 1994 08:49:37 GMT`.
+// shortcut: the obsolete RFC 850 and asctime forms are not parsed (RFC 9110 §5.6.7 tells recipients to accept them, but senders must not generate them, and ACME CAs do not); they poll after `POLL`.
+fn http_date(text: &str) -> Option<SystemTime> {
+    let mut parts = text.split(' ');
+    let (day_name, day, month, year, time, zone) = (
+        parts.next()?,
+        parts.next()?,
+        parts.next()?,
+        parts.next()?,
+        parts.next()?,
+        parts.next()?,
+    );
+    if parts.next().is_some()
+        || zone != "GMT"
+        || !["Mon,", "Tue,", "Wed,", "Thu,", "Fri,", "Sat,", "Sun,"].contains(&day_name)
+        || [day.len(), year.len(), time.len()] != [2, 4, 8]
+    {
+        return None;
+    }
+    let month = 1 + [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+    .iter()
+    .position(|name| *name == month)? as i64;
+    let digits = |text: &str| {
+        text.bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| text.parse::<i64>().ok())
+            .flatten()
+    };
+    let (hour, minute, second) = (
+        digits(time.get(..2)?)?,
+        digits(time.get(3..5)?)?,
+        digits(time.get(6..)?)?,
+    );
+    let (day, year) = (digits(day)?, digits(year)?);
+    if time.as_bytes()[2] != b':'
+        || time.as_bytes()[5] != b':'
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+    let seconds =
+        der::days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second;
+    Some(UNIX_EPOCH + Duration::from_secs(u64::try_from(seconds).ok()?))
 }
 
 fn field(value: &Value, name: &str) -> io::Result<String> {
@@ -337,5 +394,56 @@ struct Presented<'a> {
 impl Drop for Presented<'_> {
     fn drop(&mut self) {
         self.solver.clean_up(self.record, self.value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // RFC 9110 §5.6.7: the example IMF-fixdate.
+    const DATE: &str = "Sun, 06 Nov 1994 08:49:37 GMT";
+
+    fn at(seconds: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(seconds)
+    }
+
+    #[test]
+    fn http_date_parses_the_rfc_9110_example() {
+        assert_eq!(http_date(DATE), Some(at(784_111_777)));
+    }
+
+    #[test]
+    fn http_date_rejects_other_shapes() {
+        for text in [
+            "",
+            "Sunday, 06-Nov-94 08:49:37 GMT",
+            "Sun Nov  6 08:49:37 1994",
+            "Sun, 06 Nov 1994 08:49:37 UTC",
+            "Sun, 06 Nov 1994 08:49:37 GMT ",
+            "Sun, 06 Nov 94 08:49:37 GMT",
+            "Sun, 06 Nov 1994 25:49:37 GMT",
+            "Sun, 06 Nov 1994 08-49-37 GMT",
+            "Sun, 06 Foo 1994 08:49:37 GMT",
+            "Sun, +6 Nov 1994 08:49:37 GMT",
+        ] {
+            assert_eq!(http_date(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn retry_delay_honours_seconds_and_dates_within_bounds() {
+        let now = at(784_111_777 - 10);
+        assert_eq!(retry_delay(None, now), POLL);
+        assert_eq!(retry_delay(Some("7"), now), Duration::from_secs(7));
+        assert_eq!(retry_delay(Some("0"), now), Duration::from_secs(1));
+        assert_eq!(retry_delay(Some("3600"), now), Duration::from_secs(30));
+        assert_eq!(retry_delay(Some("soon"), now), POLL);
+        assert_eq!(retry_delay(Some(DATE), now), Duration::from_secs(10));
+        assert_eq!(retry_delay(Some(DATE), at(0)), Duration::from_secs(30));
+        assert_eq!(
+            retry_delay(Some(DATE), at(784_111_777 + 60)),
+            Duration::from_secs(1)
+        );
     }
 }

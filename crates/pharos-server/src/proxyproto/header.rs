@@ -183,44 +183,40 @@ fn parse_v2(input: &[u8]) -> Result<Parse<'_>, Error> {
         0x21 => Command::Proxy,
         _ => return Err(Error("v2 version or command is unsupported")),
     };
-    // PROXY protocol §2.2: only these family/protocol pairs are defined; others must be rejected.
     let family = input[13];
-    if !matches!(family, 0x00 | 0x11 | 0x12 | 0x21 | 0x22 | 0x31 | 0x32) {
-        return Err(Error("v2 address family or protocol is unsupported"));
-    }
-    if family == 0x00 && command == Command::Proxy {
-        return Err(Error("v2 PROXY command with unspecified address family"));
-    }
     let length = usize::from(u16::from_be_bytes([input[14], input[15]]));
-    // PROXY protocol §2.2: the address block holds 12, 36 or 216 octets for IPv4, IPv6 or UNIX.
-    let address_length = match family >> 4 {
-        1 => 12,
-        2 => 36,
-        3 => 216,
-        _ => 0,
-    };
     if length > MAX_V2_PAYLOAD {
         return Err(Error("v2 length exceeds the accepted maximum"));
     }
     let total = V2_PREFIX + length;
     let datagram = family & 0x0F == 0x02;
+    if command == Command::Local {
+        // PROXY protocol §2.2: a LOCAL header's family, protocol and address block are ignored; skip the block.
+        return Ok(if input.len() < total {
+            Parse::Incomplete
+        } else {
+            Parse::Header(local_v2(datagram, total))
+        });
+    }
+    // PROXY protocol §2.2: only these family/protocol pairs are defined; others must be rejected.
+    if !matches!(family, 0x11 | 0x12 | 0x21 | 0x22 | 0x31 | 0x32) {
+        return Err(Error(if family == 0x00 {
+            "v2 PROXY command with unspecified address family"
+        } else {
+            "v2 address family or protocol is unsupported"
+        }));
+    }
+    // PROXY protocol §2.2: the address block holds 12, 36 or 216 octets for IPv4, IPv6 or UNIX.
+    let address_length = match family >> 4 {
+        1 => 12,
+        2 => 36,
+        _ => 216,
+    };
     if length < address_length {
-        // PROXY protocol §2.2: a receiver skips the whole block of a LOCAL header it does not understand.
-        if command == Command::Local {
-            return Ok(if input.len() < total {
-                Parse::Incomplete
-            } else {
-                Parse::Header(local_v2(false, total))
-            });
-        }
         return Err(Error("v2 length is too short for its address family"));
     }
     if input.len() < total {
         return Ok(Parse::Incomplete);
-    }
-    if command == Command::Local {
-        // PROXY protocol §2.2: LOCAL means the receiver uses the real connection endpoints.
-        return Ok(Parse::Header(local_v2(datagram, total)));
     }
     let block = &input[V2_PREFIX..total];
     let source = match family >> 4 {
@@ -431,6 +427,23 @@ mod tests {
     fn v2_local_with_a_short_block_for_its_family_is_skipped() {
         let wire = v2(0x20, 0x11, &[]);
         assert_eq!(header(&wire).length, 16);
+    }
+
+    #[test]
+    fn v2_local_ignores_family_protocol_and_address_block() {
+        for family in [0x13, 0x41, 0x44, 0x7F, 0xFF] {
+            for block in [&[][..], &[0xAB; 7], &[0xCD; 300]] {
+                let wire = v2(0x20, family, block);
+                let parsed = header(&wire);
+                assert_eq!(
+                    (parsed.command, parsed.source, parsed.tlvs),
+                    (Command::Local, None, &[][..]),
+                    "{family:02x}"
+                );
+                assert_eq!(parsed.length, wire.len());
+                assert_eq!(parse(&wire[..wire.len() - 1]), Ok(Parse::Incomplete));
+            }
+        }
     }
 
     #[test]

@@ -1,7 +1,6 @@
 use std::{
-    io,
     net::{IpAddr, Ipv6Addr, SocketAddr},
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, atomic::AtomicU32},
 };
 
@@ -9,7 +8,7 @@ use pharos_corefile::{BlockContext, Cursor, Error, Fallthrough, normalize_domain
 use pharos_proto::Name;
 use pharos_server::{
     grpc,
-    tls::{ClientConfig, ClientOptions, ServerName, client_config},
+    tls::{ClientOptions, ServerName, client_config},
 };
 
 use super::{
@@ -79,8 +78,8 @@ pub(super) fn parse(cursor: &mut Cursor<'_>, root: Option<&Path>) -> Result<Grpc
                     return Err(cursor.arg_err());
                 }
                 tls = true;
-                tls_client =
-                    client_for(&args, root).map_err(|error| cursor.error(error.to_string()))?;
+                tls_client = crate::tls_client_from_args(&args, root)
+                    .map_err(|error| cursor.error(error.to_string()))?;
             }
             "tls_servername" => tls_servername = Some(one_arg(cursor, &args)?.to_owned()),
             "policy" => {
@@ -348,25 +347,6 @@ fn targets(to: &[String]) -> Result<Vec<Resolved>, String> {
         return Err("no nameservers found".into());
     }
     Ok(targets)
-}
-
-// CoreDNS v1.15.0 plugin/pkg/tls/tls.go NewTLSConfigFromArgs: `CA`, `CERT KEY` or `CERT KEY CA`, and no arguments for the system roots.
-fn client_for(args: &[String], root: Option<&Path>) -> io::Result<Option<Arc<ClientConfig>>> {
-    // CoreDNS v1.15.0 plugin/grpc/setup.go parseBlock: a relative path is joined to `root`.
-    let path = |index: usize| -> PathBuf { crate::resolve_path(args[index].clone().into(), root) };
-    let options = match args.len() {
-        0 => return Ok(None),
-        1 => ClientOptions {
-            ca: Some(path(0)),
-            identity: None,
-        },
-        2 | 3 => ClientOptions {
-            ca: (args.len() == 3).then(|| path(2)),
-            identity: Some((path(0), path(1))),
-        },
-        _ => return Err(io::ErrorKind::InvalidInput.into()),
-    };
-    client_config(&options).map(Some)
 }
 
 #[cfg(test)]

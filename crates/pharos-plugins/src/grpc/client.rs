@@ -20,6 +20,7 @@ use hyper::{
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use pharos_server::{
     grpc::{self, Code, FramePrefix},
+    pool::{MESSAGE_CAPACITY, Stash},
     tls::{ClientConfig, ServerName, TlsConnector},
 };
 use tokio::{
@@ -31,9 +32,10 @@ use tokio::{
 type Body = Full<Chain<FramePrefix, Wire>>;
 type Sender = http2::SendRequest<Body>;
 
-/// The most buffers a [`Pool`] keeps, and the largest capacity of one it keeps.
+/// The most buffers a [`Pool`] keeps, and the most memory they hold in all; each may hold a whole
+/// 65,535-octet Message.
 const POOL_BUFFERS: usize = 64;
-const POOL_CAPACITY: usize = 4096;
+const POOL_BYTES: usize = POOL_BUFFERS * 4096;
 
 /// A DNS Message queued for sending: a shared view of one [`Pool`] buffer, so a call needs no copy of it.
 #[derive(Clone)]
@@ -58,14 +60,19 @@ impl Buf for Wire {
 }
 
 /// Request buffers that outlive one call, so the warm path does not allocate for them.
-#[derive(Default)]
-pub(super) struct Pool(Mutex<Vec<Arc<Vec<u8>>>>);
+pub(super) struct Pool(Stash<Arc<Vec<u8>>>);
+
+impl Default for Pool {
+    fn default() -> Self {
+        Self(Stash::new(POOL_BUFFERS, MESSAGE_CAPACITY, POOL_BYTES))
+    }
+}
 
 impl Pool {
     pub(super) fn take(&self) -> Loan<'_> {
         Loan {
             pool: self,
-            buffer: lock(&self.0).pop(),
+            buffer: self.0.take(),
         }
     }
 }
@@ -100,12 +107,10 @@ impl Drop for Loan<'_> {
     fn drop(&mut self) {
         // The connection may still hold the request; a buffer someone else owns is theirs to free.
         if let Some(mut buffer) = self.buffer.take()
-            && Arc::get_mut(&mut buffer).is_some_and(|buffer| buffer.capacity() <= POOL_CAPACITY)
+            && let Some(vec) = Arc::get_mut(&mut buffer)
         {
-            let mut kept = lock(&self.pool.0);
-            if kept.len() < POOL_BUFFERS {
-                kept.push(buffer);
-            }
+            let size = vec.capacity();
+            self.pool.0.put(buffer, size);
         }
     }
 }
@@ -448,8 +453,19 @@ mod tests {
         again.buffer().extend_from_slice(b"xyz");
         let wire = again.wire();
         drop(again);
-        assert!(lock(&pool.0).is_empty());
+        assert!(pool.0.take().is_none());
         assert_eq!(wire.chunk(), b"xyz");
+    }
+
+    // RFC 1035 §4.2.2: a Message of 65,535 octets must not allocate again on the next call.
+    #[test]
+    fn pool_keeps_the_buffer_of_a_maximum_size_message() {
+        let pool = Pool::default();
+        let mut loan = pool.take();
+        loan.buffer().resize(usize::from(u16::MAX), 0);
+        drop(loan);
+        let mut again = pool.take();
+        assert!(again.buffer().capacity() >= usize::from(u16::MAX));
     }
 
     async fn reaches(bind: &str, host: &str) {

@@ -231,6 +231,26 @@ fn conflict_names_the_first_differing_policy() {
     );
 }
 
+#[test]
+fn conflict_reports_differing_keylog_paths() {
+    let log =
+        |name: &str| std::env::temp_dir().join(format!("pharos-{name}-{}", std::process::id()));
+    let load = |path: Option<PathBuf>| {
+        let mut logged = options(ClientAuth::NoCert);
+        logged.keylog = path;
+        ServerTls::load(&logged).unwrap()
+    };
+    let (a, b) = (log("keylog-a"), log("keylog-b"));
+    let base = load(Some(a.clone()));
+    assert_eq!(base.conflict(&load(Some(a.clone()))), None);
+    assert_eq!(
+        base.conflict(&load(Some(b.clone()))),
+        Some("TLS key log paths differ")
+    );
+    assert_eq!(base.conflict(&load(None)), Some("TLS key log paths differ"));
+    let _ = (std::fs::remove_file(a), std::fs::remove_file(b));
+}
+
 /// Negotiated application protocol seen by the server, for a client offering `offered`.
 async fn negotiated(server: &ServerTls, offered: &[&[u8]]) -> Option<Vec<u8>> {
     let mut config = (*client(None)).clone();

@@ -5,7 +5,10 @@ use std::{collections::HashMap, io, sync::Arc};
 use pharos_corefile::BlockContext;
 
 use super::{Entry, Solver};
-use crate::{Chain, tls::Tls};
+use crate::{
+    Chain,
+    tls::{Identity, Tls},
+};
 
 /// Every ACME entry of one configuration and the DNS-01 state they share.
 // CoreDNS v1.15.0 plugin/tls/acme.go acmeRuntime.
@@ -26,7 +29,7 @@ pub(crate) fn link(blocks: &mut [BlockContext<Chain>]) -> io::Result<Option<Arc<
         let Some(tls) = &mut block.config.tls else {
             continue;
         };
-        let Some(acme) = tls.acme.take() else {
+        let Some(acme) = tls.acme().cloned() else {
             continue;
         };
         let index = match entries.iter().position(|known| known.key == acme.key) {
@@ -50,8 +53,7 @@ pub(crate) fn link(blocks: &mut [BlockContext<Chain>]) -> io::Result<Option<Arc<
                 index
             }
         };
-        tls.server = Some(entries[index].server());
-        tls.acme = Some(Arc::clone(&entries[index]));
+        tls.identity = Identity::Acme(Arc::clone(&entries[index]));
     }
     if entries.is_empty() {
         return Ok(None);
@@ -97,15 +99,11 @@ mod tests {
         let first = blocks[0].config.tls.as_ref().unwrap();
         let second = blocks[1].config.tls.as_ref().unwrap();
         assert!(std::sync::Arc::ptr_eq(
-            first.acme.as_ref().unwrap(),
-            second.acme.as_ref().unwrap()
+            first.acme().unwrap(),
+            second.acme().unwrap()
         ));
         assert_eq!(
-            first
-                .server
-                .as_ref()
-                .unwrap()
-                .conflict(second.server.as_ref().unwrap()),
+            first.server().unwrap().conflict(&second.server().unwrap()),
             None
         );
     }
@@ -142,10 +140,9 @@ mod tests {
         );
         assert!(
             first
-                .server
-                .as_ref()
+                .server()
                 .unwrap()
-                .conflict(second.server.as_ref().unwrap())
+                .conflict(&second.server().unwrap())
                 .is_some()
         );
     }
@@ -161,8 +158,8 @@ mod tests {
         for block in &blocks {
             assert!(block.config.tls.as_ref().unwrap().answers_challenges());
         }
-        assert!(blocks[0].config.tls.as_ref().unwrap().server.is_none());
-        assert!(blocks[1].config.tls.as_ref().unwrap().server.is_some());
+        assert!(blocks[0].config.tls.as_ref().unwrap().server().is_none());
+        assert!(blocks[1].config.tls.as_ref().unwrap().server().is_some());
     }
 
     #[test]

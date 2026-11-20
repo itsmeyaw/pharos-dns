@@ -116,6 +116,7 @@ struct Policy {
     client_auth: ClientAuth,
     client_cas: Option<Vec<Vec<u8>>>,
     chain: Vec<Vec<u8>>,
+    keylog: Option<PathBuf>,
     // The identity of a swappable certificate slot, which has no fixed chain to compare.
     slot: Option<String>,
 }
@@ -228,6 +229,7 @@ impl ServerTls {
                 client_auth: options.client_auth,
                 client_cas,
                 chain: der_chain,
+                keylog: options.keylog.clone(),
                 slot: None,
             }),
         })
@@ -264,6 +266,7 @@ impl ServerTls {
                 client_auth: ClientAuth::NoCert,
                 client_cas: None,
                 chain: Vec::new(),
+                keylog: None,
                 slot: Some(identity.to_owned()),
             }),
         })
@@ -320,6 +323,9 @@ impl ServerTls {
             Some("client CA pools differ")
         } else if a.chain != b.chain || a.slot != b.slot {
             Some("server certificates differ")
+        } else if a.keylog != b.keylog {
+            // Pharos extension of the CoreDNS comparison: the first block's key log would otherwise silently win.
+            Some("TLS key log paths differ")
         } else {
             None
         }

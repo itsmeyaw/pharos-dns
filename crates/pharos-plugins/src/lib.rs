@@ -779,7 +779,7 @@ pub fn servers_with_registry(
         let empty = pharos_server::Chain::is_empty(&block.config);
         lifecycle.extend(&block.config.lifecycle);
         #[cfg(feature = "plugin-tls")]
-        let tls = block.config.tls.as_ref().and_then(|tls| tls.server.clone());
+        let tls = block.config.tls.as_ref().and_then(|tls| tls.server());
         #[cfg(not(feature = "plugin-tls"))]
         let tls: Option<pharos_server::tls::ServerTls> = None;
         let mut routes = Vec::new();
@@ -1389,6 +1389,30 @@ fn resolve_path(path: std::path::PathBuf, root: Option<&std::path::Path>) -> std
         clean.push(".");
     }
     clean
+}
+
+// CoreDNS v1.15.0 plugin/pkg/tls/tls.go NewTLSConfigFromArgs: `CA`, `CERT KEY` or `CERT KEY CA`, and no arguments for the system roots.
+#[cfg(any(feature = "plugin-forward", feature = "plugin-grpc"))]
+fn tls_client_from_args(
+    args: &[String],
+    root: Option<&std::path::Path>,
+) -> io::Result<Option<Arc<pharos_server::tls::ClientConfig>>> {
+    use pharos_server::tls::{ClientOptions, client_config};
+    // CoreDNS v1.15.0 plugin/forward/setup.go and plugin/grpc/setup.go parseBlock: a relative path is joined to `root`.
+    let path = |index: usize| resolve_path(args[index].clone().into(), root);
+    let options = match args.len() {
+        0 => return Ok(None),
+        1 => ClientOptions {
+            ca: Some(path(0)),
+            identity: None,
+        },
+        2 | 3 => ClientOptions {
+            ca: (args.len() == 3).then(|| path(2)),
+            identity: Some((path(0), path(1))),
+        },
+        _ => return Err(io::ErrorKind::InvalidInput.into()),
+    };
+    client_config(&options).map(Some)
 }
 
 #[allow(dead_code)]

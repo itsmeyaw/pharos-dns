@@ -249,6 +249,8 @@ mod nsid {
 mod proxy {
     #[path = "proxy_allocations.rs"]
     mod proxy_allocations;
+    #[path = "proxy_https_allocations.rs"]
+    mod proxy_https_allocations;
     #[path = "proxy_tcp_allocations.rs"]
     mod proxy_tcp_allocations;
 }

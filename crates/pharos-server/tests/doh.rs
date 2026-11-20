@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 
-use http_body_util::BodyExt;
 use hyper::{Method, StatusCode, Uri};
 use pharos_proto::{Class, MessageBuilder, Name, NameRef, Section, Type};
 use pharos_server::doh::{self, Source};
@@ -139,25 +138,30 @@ fn get_rejects_oversized_queries_before_decoding() {
 }
 
 // CoreDNS v1.15.0 plugin/pkg/doh/doh.go NewRequestWithContext: POST carries the wire as the body.
-#[tokio::test]
-async fn post_request_carries_the_wire_as_the_body() {
+#[test]
+fn post_request_carries_the_wire_as_the_body() {
     let wire = query_wire(0x0100);
-    let request = doh::request(&Method::POST, "dns.example", true, &wire).unwrap();
+    let mut body = Vec::new();
+    let request = doh::Endpoint::new("dns.example")
+        .unwrap()
+        .request(&Method::POST, true, &wire, &mut body)
+        .unwrap();
     assert_eq!(request.method(), Method::POST);
     assert_eq!(request.uri(), "https://dns.example/dns-query");
     assert_eq!(request.headers()["content-type"], doh::MEDIA_TYPE);
     assert_eq!(request.headers()["accept"], doh::MEDIA_TYPE);
-    assert_eq!(
-        request.into_body().collect().await.unwrap().to_bytes(),
-        wire
-    );
+    assert_eq!(body, wire);
 }
 
 // RFC 8484 §4.1: GET carries the unpadded base64url Query in the `dns` variable and no body.
-#[tokio::test]
-async fn get_request_encodes_the_wire_in_the_dns_variable() {
+#[test]
+fn get_request_encodes_the_wire_in_the_dns_variable() {
     let wire = query_wire(0x0100);
-    let request = doh::request(&Method::GET, "dns.example:8443", true, &wire).unwrap();
+    let mut body = vec![1, 2, 3];
+    let request = doh::Endpoint::new("dns.example:8443")
+        .unwrap()
+        .request(&Method::GET, true, &wire, &mut body)
+        .unwrap();
     assert_eq!(
         request.uri().to_string(),
         format!(
@@ -166,21 +170,31 @@ async fn get_request_encodes_the_wire_in_the_dns_variable() {
         )
     );
     assert_eq!(request.headers()["accept"], doh::MEDIA_TYPE);
-    assert!(
-        request
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes()
-            .is_empty()
+    assert!(body.is_empty());
+}
+
+// RFC 8484 §4.1: the origin form of a GET target carries the same `dns` variable.
+#[test]
+fn http1_get_request_encodes_the_wire_in_the_origin_form() {
+    let wire = query_wire(0x0100);
+    let request = doh::Endpoint::new("dns.example")
+        .unwrap()
+        .request(&Method::GET, false, &wire, &mut Vec::new())
+        .unwrap();
+    assert_eq!(
+        request.uri().to_string(),
+        format!("/dns-query?dns={}", base64_url(&wire))
     );
+    assert_eq!(request.headers()["host"], "dns.example");
 }
 
 // RFC 9112 §3.2: HTTP/1.1 sends the origin form and names the host in a header.
 #[test]
 fn http1_request_uses_origin_form_and_a_host_header() {
-    let request = doh::request(&Method::POST, "192.0.2.1", false, &query_wire(0)).unwrap();
+    let request = doh::Endpoint::new("192.0.2.1")
+        .unwrap()
+        .request(&Method::POST, false, &query_wire(0), &mut Vec::new())
+        .unwrap();
     assert_eq!(request.uri(), "/dns-query");
     assert_eq!(request.headers()["host"], "192.0.2.1");
 }
@@ -188,7 +202,12 @@ fn http1_request_uses_origin_form_and_a_host_header() {
 // CoreDNS v1.15.0 plugin/pkg/doh/doh.go NewRequestWithContext: "method not allowed".
 #[test]
 fn other_methods_build_no_request() {
-    assert!(doh::request(&Method::PUT, "dns.example", true, &[]).is_none());
+    let endpoint = doh::Endpoint::new("dns.example").unwrap();
+    assert!(
+        endpoint
+            .request(&Method::PUT, true, &[], &mut Vec::new())
+            .is_none()
+    );
 }
 
 fn base64_url(bytes: &[u8]) -> String {
