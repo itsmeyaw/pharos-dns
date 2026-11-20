@@ -5,7 +5,7 @@
 ## tls
 
 - `tls CERT KEY [CA]`, `client_auth nocert|request|require|verify_if_given|require_and_verify` and `keylog FILE` are supported. Relative paths resolve against `root`, as in CoreDNS.
-- The `tls` Directive serves `tls://` Server Block Keys (default port 853). Server Blocks with `https://`, `grpc://`, `quic://` or `https3://` Keys fail setup with or without `tls` until those Transports exist, instead of silently serving nothing.
+- The `tls` Directive serves `tls://` Server Block Keys (default port 853). Server Blocks with `grpc://`, `quic://` or `https3://` Keys fail setup with or without `tls` until those Transports exist, instead of silently serving nothing; `https://` Keys are served (see `https`).
 - A `tls://`, `https://`, `grpc://`, `quic://` or `https3://` Server Block without a `tls` Directive fails setup, as in CoreDNS. A `tls` Directive in a plain-DNS Server Block is loaded and validated but not used.
 - The minimum protocol version is TLS 1.2. Pharos uses rustls with the aws-lc-rs provider; CoreDNS uses Go's `crypto/tls`, so cipher-suite preference order and supported curves follow rustls rather than Go. TLS 1.3 session tickets use a rotating stateless ticketer.
 - The `tls` ACME block (`tls { acme ... }`, and `tls` without arguments) is rejected with an error; ACME certificate management is not implemented yet.
@@ -14,7 +14,7 @@
 - `client_auth request` and `client_auth require` accept any presented client certificate without verifying its chain, like Go's `RequestClientCert` and `RequireAnyClientCert`. The handshake signature is still verified. `verify_if_given` and `require_and_verify` use `CA`, or the system trust store when `CA` is omitted.
 - `keylog FILE` appends NSS Key Log lines and logs a warning at startup; as in CoreDNS, mode 0600 applies only when the file is created and the file is opened once per load. rustls cannot report a failed key-log write, so Pharos drops it silently where CoreDNS fails the handshake.
 - A client that does not complete the TLS handshake within the TCP read timeout (default 3 seconds, see `timeouts`) is disconnected. The `timeouts` Directive and `max_queries` apply to DNS over TLS like TCP.
-- `server_tls_test.go` cases for HTTPS, gRPC and QUIC Transports are not ported until those Transports exist.
+- `server_tls_test.go` cases for gRPC and QUIC Transports are not ported until those Transports exist.
 
 ## Sources
 

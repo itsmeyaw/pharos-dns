@@ -9,9 +9,11 @@ description = "Listeners, Plugin Chain contract and metrics for the Pharos DNS s
 [dependencies]
 arc-swap = "1"
 aws-lc-rs = "1"
+base64 = "0.22"
 bytes = "1"
+http-body = "1"
 http-body-util = "0.1"
-hyper = { version = "1", features = ["client", "server", "http1"] }
+hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 libc = "0.2"
 pharos-proto = { version = "0.2.0", path = "../pharos-proto" }

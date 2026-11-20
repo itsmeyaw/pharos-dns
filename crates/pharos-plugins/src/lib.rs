@@ -75,6 +75,8 @@ pub mod header;
 pub mod health;
 #[cfg(feature = "plugin-hosts")]
 pub mod hosts;
+#[cfg(feature = "plugin-https")]
+pub mod https;
 mod ipnet;
 #[cfg(feature = "plugin-k8s-external")]
 pub mod k8s_external;
@@ -513,6 +515,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("header", include_str!("header/README.md")),
     ("health", include_str!("health/README.md")),
     ("hosts", include_str!("hosts/README.md")),
+    ("https", include_str!("https/README.md")),
     ("k8s_external", include_str!("k8s_external/README.md")),
     ("kubernetes", include_str!("kubernetes/README.md")),
     ("loadbalance", include_str!("loadbalance/README.md")),
@@ -613,6 +616,8 @@ pub fn servers_with_registry(
         Option<(pharos_server::tls::ServerTls, String)>,
     );
     let mut groups: HashMap<ListenerKey, ListenerGroup> = HashMap::new();
+    // Limits of each `https://` Listener: the first Server Block's connection limit and the one explicit stream limit.
+    let mut https_limits: HashMap<ListenerKey, (Option<usize>, Option<u32>)> = HashMap::new();
     let mut lifecycle = Lifecycle::default();
     #[cfg(feature = "plugin-debug")]
     let debug = blocks.iter().any(|block| block.config.debug.is_some());
@@ -757,6 +762,7 @@ pub fn servers_with_registry(
                 "tls" if tls.is_some() => Transport::Tls,
                 "tls" => return Err(requires_tls()),
                 "https" | "grpc" | "quic" | "https3" if tls.is_none() => return Err(requires_tls()),
+                "https" => Transport::Https,
                 _ => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -912,7 +918,7 @@ pub fn servers_with_registry(
                     None,
                 )
             });
-            if listener.transport == Transport::Tls
+            if matches!(listener.transport, Transport::Tls | Transport::Https)
                 && let Some(tls) = &tls
             {
                 match &group.4 {
@@ -922,7 +928,12 @@ pub fn servers_with_registry(
                             return Err(io::Error::new(
                                 io::ErrorKind::InvalidInput,
                                 format!(
-                                    "conflicting TLS configuration for shared listener tls://{} between zones {zone:?} and {:?}: {reason}",
+                                    "conflicting TLS configuration for shared listener {}://{} between zones {zone:?} and {:?}: {reason}",
+                                    if listener.transport == Transport::Tls {
+                                        "tls"
+                                    } else {
+                                        "https"
+                                    },
                                     listener.address,
                                     domain.to_string(),
                                 ),
@@ -930,6 +941,29 @@ pub fn servers_with_registry(
                         }
                     }
                     None => group.4 = Some((tls.clone(), domain.to_string())),
+                }
+            }
+            #[cfg(feature = "plugin-https")]
+            if listener.transport == Transport::Https {
+                let first = !https_limits.contains_key(&listener);
+                let limits = https_limits.entry(listener).or_default();
+                let configured = chain.https.as_ref();
+                // CoreDNS v1.15.0 core/dnsserver/server_https.go: only the first block's max_connections applies.
+                if first {
+                    limits.0 = configured.and_then(|https| https.max_connections);
+                }
+                // CoreDNS v1.15.0 core/dnsserver/server_https.go: blocks sharing a Listener share one max_streams.
+                if let Some(streams) = configured.and_then(|https| https.max_streams) {
+                    if let Some(first) = limits.1.filter(|first| *first != streams) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "conflicting max_streams values for shared HTTPS listener {}: {first} and {streams}",
+                                listener.address
+                            ),
+                        ));
+                    }
+                    limits.1 = Some(streams);
                 }
             }
             #[cfg(feature = "plugin-timeouts")]
@@ -963,7 +997,18 @@ pub fn servers_with_registry(
         .map(|(key, (router, workers, tcp_options, allow_non_in, tls))| {
             let mut server = Server::with_registry(router, key, metrics.clone());
             server.tcp_options = tcp_options;
-            server.tls = tls.map(|(tls, _)| tls);
+            // RFC 7301 §3.1: an HTTPS Listener offers h2 and http/1.1 through ALPN.
+            server.tls = tls.map(|(tls, _)| {
+                if key.transport == Transport::Https {
+                    tls.with_alpn(pharos_server::doh::ALPN)
+                } else {
+                    tls
+                }
+            });
+            if let Some((connections, streams)) = https_limits.get(&key) {
+                server.https.max_connections = connections.unwrap_or(server.https.max_connections);
+                server.https.max_streams = streams.unwrap_or(server.https.max_streams);
+            }
             server.debug = debug;
             server.allow_non_in = allow_non_in;
             if let Some(workers) = workers {

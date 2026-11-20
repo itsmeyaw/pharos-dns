@@ -138,6 +138,8 @@ pub struct Server<C> {
     pub tcp_options: crate::TcpOptions,
     /// TLS identity of an encrypted Transport's Listener.
     pub tls: Option<crate::tls::ServerTls>,
+    /// Connection limits and response counters of an `https://` Listener.
+    pub https: crate::HttpsOptions,
     pub logger: fn(Error),
     metrics: Registry,
     dropped: Option<BlockMetrics>,
@@ -236,6 +238,16 @@ impl<C: Chain> Server<C> {
             udp_workers: crate::quota::worker_count(),
             tcp_options: crate::TcpOptions::default(),
             tls: None,
+            https: crate::HttpsOptions {
+                status: (key.transport == crate::Transport::Https).then(|| {
+                    Arc::new(crate::doh::Status::new(
+                        metrics.clone(),
+                        "https",
+                        server.clone(),
+                    ))
+                }),
+                ..crate::HttpsOptions::default()
+            },
             logger: log_error,
             metrics,
             dropped,
@@ -281,6 +293,9 @@ impl<C: Chain> Handler for Server<C> {
     }
     fn tls(&self) -> Option<crate::tls::ServerTls> {
         self.tls.clone()
+    }
+    fn https(&self) -> crate::HttpsOptions {
+        self.https.clone()
     }
     fn udp_workers(&self) -> usize {
         self.udp_workers
@@ -359,6 +374,7 @@ impl<C: Chain> crate::SelfLookupServer for Server<C> {
             udp_workers: self.udp_workers,
             tcp_options: self.tcp_options,
             tls: self.tls.clone(),
+            https: self.https.clone(),
             logger: self.logger,
             metrics: self.metrics.clone(),
             shed: self.shed.clone(),

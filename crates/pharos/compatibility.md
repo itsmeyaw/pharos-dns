@@ -219,6 +219,10 @@
 
 - [timeouts Plugin notes](../crates/pharos-plugins/src/timeouts/README.md)
 
+## https
+
+- [https Plugin notes](../crates/pharos-plugins/src/https/README.md)
+
 ## tls
 
 - [tls Plugin notes](../crates/pharos-plugins/src/tls/README.md)
@@ -252,7 +256,7 @@
 - CoreDNS v1.15.0's `plugin.SplitHostPort` caps server-block key presentation at 255 bytes before DNS wire-length validation (`plugin/normalize.go`, `core/dnsserver/register.go`). Pharos preserves this under ADR 0003 (CoreDNS wins), so some RFC 1035 §2.3.4-valid escaped names with longer presentation remain rejected.
 - CoreDNS v1.15.0 normalizes server-block names with Go 1.26.0 `strings.ToLower` and rejects IPv6 CIDRs beginning with `:` or `0` followed by `:` (`plugin/normalize.go`). Pharos preserves those Corefile behaviors under ADR 0003 (CoreDNS wins), despite RFC 4343 §3 and RFC 4291 §2.3. Pharos writes non-ASCII UTF-8 octets in normalized key text as RFC 4343 `\DDD` escapes so the ASCII DNS presentation parser can consume them; wire labels remain the same octets.
 - CoreDNS v1.15.0's caddy v1.1.4 import parser rejects patterns with multiple `*` or `?` wildcards and all bracket expressions (`caddyfile/parse.go`); Pharos preserves those limits under ADR 0003 (CoreDNS wins).
-- Only `root`, `cancel`, `timeouts`, `debug`, `shed`, `acl`, `any`, `auto`, `autopath`, `bind`, `bufsize`, `cache`, `chaos`, `dns64`, `dnssec`, `errors`, `erratic`, `file`, `forward`, `header`, `health`, `hosts`, `k8s_external`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `metadata`, `minimal`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload`, `rewrite`, `secondary`, `siit`, `sign`, `template`, `tls`, `transfer`, `tsig`, `view` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
+- Only `root`, `cancel`, `timeouts`, `debug`, `shed`, `acl`, `any`, `auto`, `autopath`, `bind`, `bufsize`, `cache`, `chaos`, `dns64`, `dnssec`, `errors`, `erratic`, `file`, `forward`, `header`, `health`, `hosts`, `https`, `k8s_external`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `metadata`, `minimal`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload`, `rewrite`, `secondary`, `siit`, `sign`, `template`, `tls`, `transfer`, `tsig`, `view` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 - A first Zone record with an omitted owner is rejected: miekg/dns accepts it with an empty owner, which cannot be encoded as a valid DNS name without inventing one.
 - Zone records whose parsed data cannot be encoded on the wire are rejected. miekg/dns can accept such records during parsing, including invalid base64, duplicate SVCB keys and RDATA over 65,535 octets, but then fails to pack them.
@@ -337,7 +341,7 @@
 - AD is preserved on local Responses, but cleared by default on unsigned forwarded Responses from plain UDP/TCP and TLS Upstreams (RFC 4035 §4.6). This differs from CoreDNS, which preserves upstream AD; the trust-policy decision is tracked in [issue #110](https://github.com/itsmeyaw/pharos-dns/issues/110). TSIG Responses are relayed unchanged to preserve their MAC. The Listener also clears AD when it re-signs a forwarded Response without upstream transaction security (RFC 8945 §5.5); `forward` has no upstream TSIG mode.
 - Message-level RRSIG inception and expiration validation uses RFC 4034 §3.1.5 serial arithmetic from RFC 1982 §3.2; logging and offline signer refresh comparisons remain open (conf/server #101).
 - DNS RCODE 16 displays as BADVERS (RFC 6895 §2.3; RFC 6891 §9); miekg `RcodeToString` displays BADSIG. Template `rcode` accepts BADSIG and rejects BADVERS, matching miekg's input names. Metrics use BADVERS; TSIG Error 16 is BADSIG (RFC 8945 §3; conf/server #101).
-- CoreDNS returns FORMERR on option unpacking errors; HTTP and QUIC report transport errors.
+- CoreDNS returns FORMERR on option unpacking errors; HTTP and QUIC report transport errors. Pharos `https://` answers every Query that fails to parse or is rejected by the accept policy with HTTP 400 (see the https Plugin notes).
 - Pharos returns a header-only FORMERR for malformed Messages, whereas CoreDNS may retain a partially decoded Question.
 - For a header-only Message claiming one Question, Pharos returns FORMERR; CoreDNS returns SERVFAIL.
 - For pass-through Responses, Pharos truncates the encoded Message without recompression; CoreDNS may fit more records by recompressing first.

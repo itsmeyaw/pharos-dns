@@ -19,7 +19,7 @@ Each scenario is a directory containing:
   `web.default.svc.cluster.local. A` with the fixture's ClusterIP before
   comparing Queries. Scenarios use `{metrics_port}` for the readiness endpoint.
   The API and DNS Listeners use the same non-ephemeral port reservation helper.
-- `queries`: one Query per line, `name type class udp|tcp|tls [flags...]`; `tls` is DNS over TLS to the same port (a TLS-only Corefile has no UDP Listener) and trusts `tests/fixtures/tls/ca.pem`.
+- `queries`: one Query per line, `name type class udp|tcp|tls|https [flags...]`; `tls` is DNS over TLS to the same port (a TLS-only Corefile has no UDP Listener) and trusts `tests/fixtures/tls/ca.pem`; `https` POSTs the Query to `/dns-query` over HTTP/1.1 on the same port (RFC 8484 §4.1) and compares the DNS Message in a 200 response.
   Names are absolute; comments begin with `#`. Supported flags are `+dnssec`,
   `+bufsize=N`, `+nsid`, `+ednsoption=CODE:HEX`, `+norec`, `+ednsversion=N`, `+opcode=NAME` or a number,
   `+ixfr=SERIAL` for an IXFR SOA in Authority,

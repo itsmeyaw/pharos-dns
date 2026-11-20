@@ -227,3 +227,61 @@ fn conflict_names_the_first_differing_policy() {
         Some("server certificates differ")
     );
 }
+
+/// Negotiated application protocol seen by the server, for a client offering `offered`.
+async fn negotiated(server: &ServerTls, offered: &[&[u8]]) -> Option<Vec<u8>> {
+    let mut config = (*client(None)).clone();
+    config.alpn_protocols = offered.iter().map(|protocol| protocol.to_vec()).collect();
+    let (client_io, server_io) = duplex(16 * 1024);
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+    let (accepted, _) = tokio::join!(
+        server.acceptor().accept(server_io),
+        connector.connect(ServerName::try_from("localhost").unwrap(), client_io)
+    );
+    accepted
+        .unwrap()
+        .get_ref()
+        .1
+        .alpn_protocol()
+        .map(<[u8]>::to_vec)
+}
+
+// RFC 7301 §3.2: the server picks the first of its protocols that the client offers.
+#[tokio::test]
+async fn alpn_follows_the_server_preference_and_is_optional() {
+    let server = ServerTls::load(&options(ClientAuth::NoCert))
+        .unwrap()
+        .with_alpn(&[b"h2", b"http/1.1"]);
+    assert_eq!(
+        negotiated(&server, &[b"http/1.1", b"h2"]).await.as_deref(),
+        Some(&b"h2"[..])
+    );
+    assert_eq!(
+        negotiated(&server, &[b"http/1.1"]).await.as_deref(),
+        Some(&b"http/1.1"[..])
+    );
+    assert_eq!(negotiated(&server, &[]).await, None);
+}
+
+// RFC 7301 §3.2: no overlap is fatal when the server has protocols and the client offers some.
+#[tokio::test]
+async fn alpn_without_overlap_fails_the_handshake() {
+    let server = ServerTls::load(&options(ClientAuth::NoCert))
+        .unwrap()
+        .with_alpn(&[b"h2"]);
+    let mut config = (*client(None)).clone();
+    config.alpn_protocols = vec![b"imap".to_vec()];
+    let (client_io, server_io) = duplex(16 * 1024);
+    let (accepted, _) = tokio::join!(
+        server.acceptor().accept(server_io),
+        tokio_rustls::TlsConnector::from(Arc::new(config))
+            .connect(ServerName::try_from("localhost").unwrap(), client_io)
+    );
+    assert!(accepted.is_err());
+}
+
+#[tokio::test]
+async fn alpn_does_not_change_the_shared_listener_policy() {
+    let plain = ServerTls::load(&options(ClientAuth::NoCert)).unwrap();
+    assert_eq!(plain.conflict(&plain.with_alpn(&[b"h2"])), None);
+}

@@ -12,6 +12,7 @@ fn config_only(name: &str) -> bool {
             | "bind"
             | "multisocket"
             | "tls"
+            | "https"
             | "ready"
             | "health"
             | "reload"
@@ -87,6 +88,7 @@ fn main() {
             "minimal" => "minimal::Minimal",
             "multisocket" => "Option<usize>",
             "tls" => "tls::Tls",
+            "https" => "https::Https",
             "whoami" => "whoami::Whoami",
             "view" => "view::View",
             "log" => "log::Log",
@@ -144,6 +146,7 @@ fn main() {
             "minimal" => "minimal::setup::setup",
             "multisocket" => "multisocket::setup::setup",
             "tls" => "tls::setup::setup",
+            "https" => "https::setup::setup",
             "whoami" => "whoami::setup::setup",
             "view" => "view::setup::setup",
             "log" => "log::setup::setup",
