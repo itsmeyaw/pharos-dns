@@ -351,6 +351,7 @@ async fn force_tcp_takes_precedence_in_protocol_selection() {
                 Options {
                     force_tcp,
                     prefer_udp,
+                    ..Options::default()
                 },
             )
             .await

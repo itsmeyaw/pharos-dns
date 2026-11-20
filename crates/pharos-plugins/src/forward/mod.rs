@@ -241,6 +241,7 @@ impl Forward {
                 options: Options {
                     force_tcp: config.force_tcp,
                     prefer_udp: config.prefer_udp,
+                    ..Options::default()
                 },
                 policy: config.policy,
                 robin: AtomicUsize::new(0),

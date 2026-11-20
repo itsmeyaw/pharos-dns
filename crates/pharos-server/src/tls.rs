@@ -13,7 +13,7 @@ use std::{
 };
 
 use rustls::{
-    ClientConfig, DistinguishedName, RootCertStore, ServerConfig, SignatureScheme,
+    DistinguishedName, RootCertStore, ServerConfig, SignatureScheme,
     client::danger::HandshakeSignatureValid,
     crypto::{
         CryptoProvider, WebPkiSupportedAlgorithms, aws_lc_rs, verify_tls12_signature,
@@ -27,7 +27,8 @@ use rustls::{
     version::{TLS12, TLS13},
 };
 
-pub use tokio_rustls::{TlsAcceptor, TlsConnector};
+pub use rustls::{ClientConfig, pki_types::ServerName};
+pub use tokio_rustls::{TlsAcceptor, TlsConnector, client::TlsStream as ClientStream};
 
 /// Whether and how a Listener asks its clients for a certificate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
