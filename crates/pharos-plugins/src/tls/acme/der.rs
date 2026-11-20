@@ -185,7 +185,11 @@ pub(crate) fn validity(certificate: &[u8]) -> Option<Validity> {
 
 // RFC 5280 §4.1.2.5.1 and §4.1.2.5.2: UTCTime is YYMMDDHHMMSSZ, GeneralizedTime YYYYMMDDHHMMSSZ.
 fn time(tag: u8, content: &[u8]) -> Option<SystemTime> {
+    // RFC 5280 §4.1.2.5: times are ASCII digits; refusing other bytes keeps the slicing below on char boundaries.
     let text = std::str::from_utf8(content).ok()?.strip_suffix('Z')?;
+    if !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
     let (year, rest) = match tag {
         UTC_TIME if text.len() == 12 => {
             let year: i64 = text[..2].parse().ok()?;
@@ -311,6 +315,8 @@ mod tests {
         );
         assert_eq!(time(UTC_TIME, b"251320120000Z"), None);
         assert_eq!(time(UTC_TIME, b"2511201200Z"), None);
+        assert_eq!(time(UTC_TIME, "25112012000é Z".as_bytes()), None);
+        assert_eq!(time(UTC_TIME, "2511201200éZ".as_bytes()), None);
     }
 
     #[test]

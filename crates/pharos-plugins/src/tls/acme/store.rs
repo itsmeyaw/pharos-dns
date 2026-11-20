@@ -59,10 +59,11 @@ pub(crate) fn pem_encode(label: &str, der: &[u8]) -> String {
 
 // Keep a name usable as one path component: only DNS characters and e-mail punctuation survive.
 fn component(text: &str) -> String {
-    let text = text.replace('*', "wildcard_");
+    // A literal name cannot contain '%', so "%2a" never collides with a name that merely resembles a wildcard.
+    let text = text.replace('*', "%2a");
     text.chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@') {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@' | '%') {
                 c
             } else {
                 '_'
@@ -79,15 +80,35 @@ fn write(path: &Path, contents: &[u8], private: bool) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     let temporary = path.with_extension("tmp");
+    // A stale or planted temporary file is replaced, never written through: create_new refuses an existing path or symlink.
+    match fs::remove_file(&temporary) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
     let mut file = fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(if private { 0o600 } else { 0o644 })
         .open(&temporary)?;
     file.write_all(contents)?;
     file.sync_all()?;
     fs::rename(temporary, path)
+}
+
+// Stored PEM files are a few KiB; refuse anything far larger than a certificate chain.
+const MAX_STORED: u64 = 1 << 20;
+
+fn read_capped(path: &Path) -> Option<String> {
+    (fs::metadata(path).ok()?.len() <= MAX_STORED)
+        .then(|| fs::read_to_string(path).ok())
+        .flatten()
+}
+
+/// A certificate and key written beside the live pair until the caller has checked they load.
+pub(crate) struct Staged {
+    pub certificate: PathBuf,
+    pub key: PathBuf,
+    live: (PathBuf, PathBuf),
 }
 
 impl Store {
@@ -117,7 +138,7 @@ impl Store {
 
     /// The PKCS#8 account key of `email`, if one was saved.
     pub(crate) fn account(&self, email: Option<&str>) -> Option<Vec<u8>> {
-        let pem = fs::read_to_string(self.account_path(email)).ok()?;
+        let pem = read_capped(&self.account_path(email))?;
         pem_blocks(&pem)
             .into_iter()
             .find(|(label, _)| label == "PRIVATE KEY")
@@ -135,7 +156,7 @@ impl Store {
     /// The paths of the saved certificate chain and key of `name`, and when that certificate ends.
     pub(crate) fn certificate(&self, name: &str) -> Option<(PathBuf, PathBuf, der::Validity)> {
         let (certificate, key) = self.certificate_paths(name);
-        let pem = fs::read_to_string(&certificate).ok()?;
+        let pem = read_capped(&certificate)?;
         let (_, leaf) = pem_blocks(&pem)
             .into_iter()
             .find(|(label, _)| label == "CERTIFICATE")?;
@@ -143,17 +164,31 @@ impl Store {
         Some((certificate, key, der::validity(&leaf)?))
     }
 
-    /// Save a new chain (PEM) and its key; the key goes first so a chain never lacks its key.
-    pub(crate) fn save_certificate(
+    /// Write a new chain (PEM) and its key next to the live pair, which stays in place.
+    pub(crate) fn stage_certificate(
         &self,
         name: &str,
         chain: &str,
         pkcs8: &[u8],
-    ) -> io::Result<(PathBuf, PathBuf)> {
+    ) -> io::Result<Staged> {
         let (certificate, key) = self.certificate_paths(name);
-        write(&key, pem_encode("PRIVATE KEY", pkcs8).as_bytes(), true)?;
-        write(&certificate, chain.as_bytes(), false)?;
-        Ok((certificate, key))
+        let staged = (
+            certificate.with_extension("pem.new"),
+            key.with_extension("pem.new"),
+        );
+        write(&staged.1, pem_encode("PRIVATE KEY", pkcs8).as_bytes(), true)?;
+        write(&staged.0, chain.as_bytes(), false)?;
+        Ok(Staged {
+            certificate: staged.0,
+            key: staged.1,
+            live: (certificate, key),
+        })
+    }
+
+    /// Replace the live pair with the staged one; the key goes first so a chain never lacks its key.
+    pub(crate) fn commit_certificate(&self, staged: Staged) -> io::Result<()> {
+        fs::rename(&staged.key, &staged.live.1)?;
+        fs::rename(&staged.certificate, &staged.live.0)
     }
 }
 
@@ -210,7 +245,8 @@ mod tests {
 
     #[test]
     fn names_become_single_path_components() {
-        assert_eq!(component("*.dns.example"), "wildcard_.dns.example");
+        assert_eq!(component("*.dns.example"), "%2a.dns.example");
+        assert_ne!(component("*.dns.example"), component("_.dns.example"));
         assert_eq!(component("../etc/passwd"), "_etc_passwd");
         assert_eq!(component("a@b.example"), "a@b.example");
     }
@@ -227,18 +263,43 @@ mod tests {
         );
         assert!(dir.join("ca.example_14000/accounts/default.key").is_file());
 
-        let (certificate, key) = store
-            .save_certificate("*.dns.example", "chain", b"key")
+        let staged = store
+            .stage_certificate("*.dns.example", "chain", b"key")
             .unwrap();
+        assert!(staged.certificate.is_file());
+        assert!(
+            store.certificate("*.dns.example").is_none(),
+            "a staged pair is not live"
+        );
+        let key = staged.key.clone();
         assert_eq!(
-            std::fs::metadata(key).unwrap().permissions().mode() & 0o777,
+            std::fs::metadata(&key).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        assert!(certificate.ends_with("certificates/wildcard_.dns.example/certificate.pem"));
+        store.commit_certificate(staged).unwrap();
+        let live = dir.join("ca.example_14000/certificates/%2a.dns.example");
+        assert!(live.join("certificate.pem").is_file() && live.join("key.pem").is_file());
         assert!(
             store.certificate("*.dns.example").is_none(),
             "unparsable chain is not reused"
         );
+
+        // A planted temporary file or symlink is replaced, not written through.
+        let target = dir.join("victim");
+        std::fs::write(&target, "keep").unwrap();
+        std::os::unix::fs::symlink(&target, live.join("key.pem.tmp")).unwrap();
+        store
+            .stage_certificate("*.dns.example", "chain", b"key2")
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+
+        // Oversized files are ignored instead of read.
+        std::fs::write(
+            live.join("certificate.pem"),
+            vec![b'x'; super::MAX_STORED as usize + 1],
+        )
+        .unwrap();
+        assert!(store.certificate("*.dns.example").is_none());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

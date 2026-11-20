@@ -60,18 +60,26 @@ impl Runtime {
         };
         lifecycle.register_sync(Phase::Started, start.clone());
         lifecycle.register_sync(Phase::RestartFailed, start);
-        let stop = move || -> io::Result<()> {
-            for task in tasks
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .drain(..)
-            {
-                task.abort();
+        let stop = move || {
+            let tasks = Arc::clone(&tasks);
+            async move {
+                let drained: Vec<_> = tasks
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .drain(..)
+                    .collect();
+                for task in &drained {
+                    task.abort();
+                }
+                // Wait for cancellation so a replacement task never overlaps one that is still writing.
+                for task in drained {
+                    let _ = task.await;
+                }
+                Ok(())
             }
-            Ok(())
         };
-        lifecycle.register_sync(Phase::Restart, stop.clone());
-        lifecycle.register_sync(Phase::Shutdown, stop);
+        lifecycle.register(Phase::Restart, stop.clone());
+        lifecycle.register(Phase::Shutdown, stop);
     }
 }
 
@@ -166,8 +174,10 @@ pub(super) async fn obtain(
             }
         })
         .await?;
-    let (certificate, private_key) = store.save_certificate(name, &issued.chain, &issued.key)?;
-    entry.slot.load(name, &certificate, &private_key)?;
+    // The pair replaces the last good one only after the slot accepted it (RFC 8555 §7.4: the key matches the certificate).
+    let staged = store.stage_certificate(name, &issued.chain, &issued.key)?;
+    entry.slot.load(name, &staged.certificate, &staged.key)?;
+    store.commit_certificate(staged)?;
     log(
         "INFO",
         "tls",
