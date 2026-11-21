@@ -267,6 +267,7 @@ async fn resolve_local_endpoint(service: &str, host_port: &str) -> io::Result<Op
 /// A running exporter: spans enter the bounded queue and leave in batches.
 pub(super) struct Tracer {
     queue: Arc<Queue>,
+    metrics: TraceMetrics,
     task: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -326,10 +327,11 @@ impl Tracer {
             transport,
             interval,
             batch_size,
-            metrics,
+            metrics.clone(),
         ));
         Ok(Self {
             queue,
+            metrics,
             task: Mutex::new(Some(task)),
         })
     }
@@ -339,6 +341,7 @@ impl Tracer {
     pub(super) fn detached(queue: Arc<Queue>) -> Self {
         Self {
             queue,
+            metrics: TraceMetrics::default(),
             task: Mutex::new(None),
         }
     }
@@ -359,6 +362,25 @@ impl Tracer {
             && timeout(REQUEST_TIMEOUT, &mut task).await.is_err()
         {
             task.abort();
+            // Awaiting the aborted task waits until its future is dropped, so the in-flight guard has counted its batch.
+            let _ = task.await;
+            // The queue is closed, so what is left can no longer grow; every span the abort discards is counted as an export failure.
+            self.metrics
+                .dropped_export_failed(self.queue.discard() as u64);
+        }
+    }
+}
+
+/// Counts a batch as an export failure if its task is dropped, as an abort does, before the batch is settled.
+struct InFlight<'a> {
+    metrics: &'a TraceMetrics,
+    count: u64,
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        if self.count != 0 {
+            self.metrics.dropped_export_failed(self.count);
         }
     }
 }
@@ -386,6 +408,11 @@ async fn run(
             queue.swap(&mut spare);
             if !spare.is_empty() {
                 let count = spare.len() as u64;
+                // zipkin-go reporter/http sendBatch: spans taken for a request that is then aborted still count as failed exports.
+                let mut in_flight = InFlight {
+                    metrics: &metrics,
+                    count,
+                };
                 encoder.encode(&spare, &mut body);
                 // zipkin-go reporter/http sendBatch: the request is bounded by a timeout and a failed batch is not retried here.
                 let result = timeout(
@@ -393,6 +420,7 @@ async fn run(
                     transport.send(encoder.method(), &encoder.headers(spare.len()), &body),
                 )
                 .await;
+                in_flight.count = 0;
                 let failure = match result {
                     // RFC 9110 §15.3: 2xx means the collector accepted the spans.
                     Ok(Ok(status)) if (200..300).contains(&status) => None,

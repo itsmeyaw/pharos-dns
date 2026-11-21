@@ -71,6 +71,14 @@ impl Queue {
         );
     }
 
+    /// Empty the queue and return how many spans it held.
+    pub(super) fn discard(&self) -> usize {
+        let mut spans = self.spans.lock().unwrap_or_else(PoisonError::into_inner);
+        let count = spans.len();
+        spans.clear();
+        count
+    }
+
     pub(super) fn spare(&self) -> VecDeque<SpanRecord> {
         VecDeque::with_capacity(self.backlog.min(1024))
     }

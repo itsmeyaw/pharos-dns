@@ -326,6 +326,36 @@ async fn hung_collector_neither_fails_nor_slows_queries() {
 }
 
 #[tokio::test]
+async fn aborted_stop_counts_every_span_it_discards() {
+    let collector = Collector::start(Mode::Hang).await;
+    let (server, lifecycle, registry) = start(
+        "zipkin_max_batch_size 1\n zipkin_max_batch_interval 10ms",
+        collector.address,
+    )
+    .await;
+    let mut response = Vec::with_capacity(512);
+    query(&server, &mut response).await;
+    until("the request to reach the collector", || {
+        collector.spans() == 1
+    })
+    .await;
+    for _ in 0..50 {
+        query(&server, &mut response).await;
+    }
+    lifecycle.run(Phase::Shutdown).await.unwrap();
+    let accounted = metric(&registry, "pharos_trace_exported_spans_total ")
+        + metric(
+            &registry,
+            "pharos_trace_dropped_spans_total{reason=\"export_failed\"} ",
+        )
+        + metric(
+            &registry,
+            "pharos_trace_dropped_spans_total{reason=\"queue_full\"} ",
+        );
+    assert_eq!(accounted, 51);
+}
+
+#[tokio::test]
 async fn full_queue_drops_the_oldest_spans_and_counts_them() {
     let collector = Collector::start(Mode::Accept).await;
     let (server, lifecycle, registry) = start(
