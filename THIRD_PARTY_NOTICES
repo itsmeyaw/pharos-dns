@@ -43,6 +43,7 @@
 - Upstream proxy exchange and tests follow CoreDNS v1.15.0's `plugin/pkg/proxy`.
 - The forward Plugin and tests follow CoreDNS v1.15.0's `plugin/forward`.
 - The grpc Plugin and tests follow CoreDNS v1.15.0's `plugin/grpc`.
+- The route53 Plugin and tests follow CoreDNS v1.15.0's `plugin/route53`.
 - DoH Upstream request construction in `crates/pharos-server/src/doh.rs` and its tests follow CoreDNS v1.15.0's `plugin/pkg/doh`.
 - The cache Plugin and tests follow CoreDNS v1.15.0's `plugin/cache`, `plugin/pkg/cache` and `plugin/pkg/dnsutil`.
 - The hosts Plugin and tests follow CoreDNS v1.15.0's `plugin/hosts` and `plugin/pkg/fall`.
