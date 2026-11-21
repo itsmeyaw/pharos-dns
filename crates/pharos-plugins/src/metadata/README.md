@@ -6,7 +6,7 @@
 
 - Invalid configured Domains that cannot be normalized or represented as DNS names are ignored; CoreDNS retains some malformed Domain strings.
 - Query-derived Kubernetes values use ASCII lowercasing and require UTF-8; CoreDNS uses Go's Unicode lowercasing and DNS presentation escaping.
-- The fixed copied-value buffer is limited to 24 labels and 2,048 bytes shared by the Kubernetes and geoip labels; CoreDNS's map is unbounded. Kubernetes client Pod labels use a shared snapshot and are not subject to this limit.
+- The fixed copied-value buffer is limited to 16 labels and 1,280 bytes shared by the Kubernetes and geoip labels; CoreDNS's map is unbounded. Kubernetes client Pod labels use a shared snapshot and are not subject to this limit.
 - Kubernetes multicluster labels use the matched Kubernetes Domain; CoreDNS's server collection leaves the request's Zone empty, so it may parse these labels as ordinary service/port names.
 
 ## Differential scenarios
