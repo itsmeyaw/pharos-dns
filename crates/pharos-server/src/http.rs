@@ -65,6 +65,8 @@ struct Guard {
 struct State<R> {
     route: R,
     guard: Guard,
+    /// Longest time one connection may stay open.
+    lifetime: Duration,
 }
 
 /// Maps one request to a response: `Plain` wraps the synchronous callbacks, `AsyncRoute` the asynchronous one.
@@ -100,7 +102,7 @@ pub struct RouteRequest {
 pub struct Reply {
     pub status: u16,
     pub content_type: &'static str,
-    /// Extra header fields as lowercase `(name, value)` pairs; invalid pairs are dropped.
+    /// Extra header fields as lowercase `(name, value)` pairs; an invalid status, content type or pair makes the response a 500.
     pub headers: Vec<(&'static str, &'static str)>,
     pub body: Bytes,
 }
@@ -112,7 +114,11 @@ where
     F: Fn(RouteRequest) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Reply> + Send + 'static,
 {
-    async fn call(&self, request: Request<Incoming>, _secure: bool) -> Response<Full<Bytes>> {
+    async fn call(&self, request: Request<Incoming>, secure: bool) -> Response<Full<Bytes>> {
+        if misdirected(&request, secure) {
+            // RFC 9110 §7.4: Cleartext listeners reject absolute HTTPS targets.
+            return text_response(StatusCode::MISDIRECTED_REQUEST, "Misdirected Request\n");
+        }
         let method = request.method().as_str();
         if !recognized_method(method) {
             // RFC 9110 §9.1: Unsupported method tokens receive 501.
@@ -126,24 +132,37 @@ where
             query: request.uri().query().map(str::to_owned),
         })
         .await;
-        let Ok(status) = StatusCode::from_u16(reply.status) else {
-            return text_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error\n");
-        };
-        let mut response = Response::new(Full::new(reply.body));
-        *response.status_mut() = status;
-        let headers = response.headers_mut();
-        // RFC 9110 §8.3: Content-Type describes the representation.
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static(reply.content_type));
-        for (name, value) in reply.headers {
-            if let (Ok(name), Ok(value)) = (
-                HeaderName::from_bytes(name.as_bytes()),
-                HeaderValue::from_str(value),
-            ) {
-                headers.insert(name, value);
-            }
-        }
-        response
+        // RFC 9110 §15.6.1: A route reply that cannot be serialized is a server failure.
+        reply_response(reply).unwrap_or_else(|| {
+            text_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error\n")
+        })
     }
+}
+
+fn reply_response(reply: Reply) -> Option<Response<Full<Bytes>>> {
+    // RFC 9110 §15: A status code is three digits.
+    let status = StatusCode::from_u16(reply.status).ok()?;
+    let mut response = Response::new(Full::new(reply.body));
+    *response.status_mut() = status;
+    let headers = response.headers_mut();
+    // RFC 9110 §8.3: Content-Type describes the representation; a field value cannot hold control bytes.
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_str(reply.content_type).ok()?,
+    );
+    for (name, value) in reply.headers {
+        // RFC 9110 §5.1, §5.5: Field names are tokens and field values are visible characters.
+        headers.insert(
+            HeaderName::from_bytes(name.as_bytes()).ok()?,
+            HeaderValue::from_str(value).ok()?,
+        );
+    }
+    Some(response)
+}
+
+/// RFC 9110 §7.4: A cleartext listener is not authoritative for an absolute `https` target.
+fn misdirected(request: &Request<Incoming>, secure: bool) -> bool {
+    !secure && request.uri().scheme_str() == Some("https")
 }
 
 fn text_response(status: StatusCode, body: &'static str) -> Response<Full<Bytes>> {
@@ -287,20 +306,27 @@ impl Listener {
     where
         F: Fn(&str, &str) -> Option<(u16, &'static str, String)> + Send + Sync + 'static,
     {
-        Self::bind_route(address, Plain(route), security).await
+        Self::bind_route(address, Plain(route), security, TIMEOUT).await
     }
 
     /// Bind an endpoint whose route is asynchronous and returns binary bodies, headers and any status.
     /// The route receives every recognized method and chooses 404 or 405 itself; it runs on a Tokio worker.
-    pub async fn bind_async<F, Fut>(address: &str, route: F) -> io::Result<Self>
+    /// `lifetime` caps each connection instead of the five seconds the other constructors use;
+    /// shutdown still drains for five seconds, so a request running longer is cut off then.
+    pub async fn bind_async<F, Fut>(address: &str, route: F, lifetime: Duration) -> io::Result<Self>
     where
         F: Fn(RouteRequest) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Reply> + Send + 'static,
     {
-        Self::bind_route(address, AsyncRoute(route), Security::default()).await
+        Self::bind_route(address, AsyncRoute(route), Security::default(), lifetime).await
     }
 
-    async fn bind_route<R: Route>(address: &str, route: R, security: Security) -> io::Result<Self> {
+    async fn bind_route<R: Route>(
+        address: &str,
+        route: R,
+        security: Security,
+        lifetime: Duration,
+    ) -> io::Result<Self> {
         let guard = Guard {
             // RFC 7301 §3.1: the server selects h2 or http/1.1 from the client's offer.
             acceptor: security.tls.as_ref().map(|tls| {
@@ -337,7 +363,11 @@ impl Listener {
         };
         let address = listener.local_addr()?;
         let (stop, mut receiver) = watch::channel(false);
-        let state = Arc::new(State { route, guard });
+        let state = Arc::new(State {
+            route,
+            guard,
+            lifetime,
+        });
         let task = tokio::spawn(async move {
             let mut connections = JoinSet::new();
             let result = loop {
@@ -364,7 +394,7 @@ impl Listener {
                         let mut stop = receiver.clone();
                         connections.spawn(async move {
                             // shortcut: cap the connection lifetime until per-request read, write and idle deadlines are supported.
-                            let deadline = tokio::time::sleep(TIMEOUT);
+                            let deadline = tokio::time::sleep(state.lifetime);
                             tokio::pin!(deadline);
                             let Some(acceptor) = &state.guard.acceptor else {
                                 serve_http1(stream, &state, &mut stop, deadline).await;
@@ -563,7 +593,7 @@ where
     let method = request.method().as_str();
     let path = request.uri().path();
     let is_metrics = path == "/metrics";
-    let response = if !secure && request.uri().scheme_str() == Some("https") {
+    let response = if misdirected(&request, secure) {
         // RFC 9110 §7.4: Cleartext listeners reject absolute HTTPS targets.
         Some((
             421,

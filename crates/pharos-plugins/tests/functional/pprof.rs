@@ -247,7 +247,8 @@ async fn cpu_profile_decodes_as_pprof_protobuf() {
     let lifecycle = started(address).await;
     let _burner = Burner::start();
     let start = std::time::Instant::now();
-    let response = request(address, "GET", "/debug/pprof/profile?seconds=1").await;
+    // `%31` is the percent-encoded digit 1.
+    let response = request(address, "GET", "/debug/pprof/profile?seconds=%31").await;
     assert!(start.elapsed() >= Duration::from_secs(1));
     assert_eq!(response.status(), "http/1.1 200 ok", "{}", response.text());
     assert!(
@@ -274,27 +275,64 @@ async fn cpu_profile_decodes_as_pprof_protobuf() {
 }
 
 #[tokio::test]
-async fn invalid_seconds_exceed_write_timeout_and_are_rejected() {
+async fn invalid_and_excessive_seconds_are_rejected() {
     let address = free_address();
     let lifecycle = started(address).await;
-    // Go net/http/pprof Profile: parse errors and non-positive values mean 30 s; 5 s or more exceeds WriteTimeout.
+    // Pharos rule: a present `seconds` that is unparsable or at most zero is 400, where Go silently uses 30.
     for query in [
-        "",
         "?seconds=abc",
         "?seconds=0",
         "?seconds=-3",
-        "?seconds=5",
-        "?seconds=30",
         "?seconds=",
+        "?seconds=%zz",
+        "?seconds=99999999999999999999",
     ] {
         let response = request(address, "GET", &format!("/debug/pprof/profile{query}")).await;
         assert_eq!(response.status(), "http/1.1 400 bad request", "{query}");
-        assert_eq!(
-            response.text(),
-            "profile duration exceeds server's WriteTimeout\n",
-            "{query}"
-        );
+        assert_eq!(response.text(), "invalid seconds\n", "{query}");
     }
+    // Pharos rule: the documented cap is 300 s, which Go does not have.
+    for query in ["?seconds=301", "?seconds=%33%30%31"] {
+        let response = request(address, "GET", &format!("/debug/pprof/profile{query}")).await;
+        assert_eq!(response.status(), "http/1.1 400 bad request", "{query}");
+        assert_eq!(response.text(), "profile duration too long\n", "{query}");
+    }
+    lifecycle.run(Phase::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_profile_request_never_frees_the_slot_early_or_blocks_later_ones() {
+    let _profiler = PROFILER.lock().await;
+    let address = free_address();
+    let lifecycle = started(address).await;
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(b"GET /debug/pprof/profile?seconds=1 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The client goes away mid-profile.
+    drop(stream);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    // Go runtime/pprof StartCPUProfile: a request is either refused as in use or profiles successfully.
+    let status = loop {
+        let response = request(address, "GET", "/debug/pprof/profile?seconds=1").await;
+        match response.status() {
+            "http/1.1 200 ok" => break response.status().to_owned(),
+            "http/1.1 500 internal server error" => {
+                assert_eq!(
+                    response.text(),
+                    "Could not enable CPU profiling: cpu profiling already in use\n"
+                );
+                assert!(std::time::Instant::now() < deadline, "slot never freed");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            other => panic!("{other}: {}", response.text()),
+        }
+    };
+    assert_eq!(status, "http/1.1 200 ok");
+    let later = request(address, "GET", "/debug/pprof/profile?seconds=1").await;
+    assert_eq!(later.status(), "http/1.1 200 ok", "{}", later.text());
     lifecycle.run(Phase::Shutdown).await.unwrap();
 }
 

@@ -772,12 +772,16 @@ pub fn servers_with_registry(
             health_addresses.push((health.address.clone(), health.lameduck));
         }
         #[cfg(feature = "plugin-pprof")]
-        if let Some(pprof) = &block.config.pprof
-            && !pprof_addresses
-                .iter()
-                .any(|(address, _)| *address == pprof.address)
-        {
-            pprof_addresses.push((pprof.address.clone(), pprof.block_rate));
+        if let Some(pprof) = &block.config.pprof {
+            // CoreDNS v1.15.0 plugin/pprof/pprof.go: one pprof listener serves an address; Server Blocks naming it share it.
+            match pprof_addresses
+                .iter_mut()
+                .find(|(address, _)| *address == pprof.address)
+            {
+                // CoreDNS v1.15.0 plugin/pprof/setup.go: any block that sets `block` counts, the first value wins.
+                Some((_, rate)) => *rate = rate.or(pprof.block_rate),
+                None => pprof_addresses.push((pprof.address.clone(), pprof.block_rate)),
+            }
         }
         #[cfg(feature = "plugin-ready")]
         if let Some(ready) = &block.config.ready {
@@ -1229,6 +1233,7 @@ pub fn servers_with_registry(
     }
     #[cfg(feature = "plugin-pprof")]
     for (address, block_rate) in pprof_addresses {
+        // CoreDNS v1.15.0 plugin/pprof/pprof.go: the listener starts on startup, stops on restart and shutdown, and a failed restart brings it back.
         let listener = Arc::new(std::sync::Mutex::new(None::<pharos_server::http::Listener>));
         let startup_listener = Arc::clone(&listener);
         let start = move || {
@@ -1238,8 +1243,13 @@ pub fn servers_with_registry(
                 if listener.lock().unwrap().is_some() {
                     return Ok(());
                 }
-                let server =
-                    pharos_server::http::Listener::bind_async(&address, pprof::http::route).await?;
+                let server = pharos_server::http::Listener::bind_async(
+                    &address,
+                    pprof::http::route,
+                    // Go net/http/pprof Profile: a profile response outlasts the default five-second connection cap.
+                    pprof::http::LIFETIME,
+                )
+                .await?;
                 if let Some(rate) = block_rate {
                     // CoreDNS v1.15.0 plugin/pprof/pprof.go: runtime.SetBlockProfileRate has no Rust equivalent.
                     pharos_server::logging::log(

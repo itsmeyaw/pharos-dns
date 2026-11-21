@@ -476,17 +476,21 @@ async fn shutdown_drains_response_in_progress() {
 
 #[tokio::test]
 async fn async_route_serves_awaited_binary_body_headers_and_query() {
-    let listener = Listener::bind_async("127.0.0.1:0", |request| async move {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        Reply {
-            status: if request.method == "GET" { 200 } else { 405 },
-            content_type: "application/octet-stream",
-            headers: vec![("x-extra", "yes")],
-            body: format!("{}?{}", request.path, request.query.unwrap_or_default())
-                .into_bytes()
-                .into(),
-        }
-    })
+    let listener = Listener::bind_async(
+        "127.0.0.1:0",
+        |request| async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Reply {
+                status: if request.method == "GET" { 200 } else { 405 },
+                content_type: "application/octet-stream",
+                headers: vec![("x-extra", "yes")],
+                body: format!("{}?{}", request.path, request.query.unwrap_or_default())
+                    .into_bytes()
+                    .into(),
+            }
+        },
+        Duration::from_secs(5),
+    )
     .await
     .unwrap();
     let address = listener.local_addr();
@@ -528,17 +532,21 @@ async fn async_route_serves_awaited_binary_body_headers_and_query() {
 
 #[tokio::test]
 async fn async_route_in_flight_does_not_block_other_requests_and_drains_on_shutdown() {
-    let listener = Listener::bind_async("127.0.0.1:0", |request| async move {
-        if request.path == "/slow" {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-        }
-        Reply {
-            status: 200,
-            content_type: "text/plain",
-            headers: Vec::new(),
-            body: request.path.into_bytes().into(),
-        }
-    })
+    let listener = Listener::bind_async(
+        "127.0.0.1:0",
+        |request| async move {
+            if request.path == "/slow" {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            Reply {
+                status: 200,
+                content_type: "text/plain",
+                headers: Vec::new(),
+                body: request.path.into_bytes().into(),
+            }
+        },
+        Duration::from_secs(5),
+    )
     .await
     .unwrap();
     let address = listener.local_addr();
@@ -556,4 +564,138 @@ async fn async_route_in_flight_does_not_block_other_requests_and_drains_on_shutd
     assert!(!slow.is_finished());
     listener.shutdown().await.unwrap();
     assert!(slow.await.unwrap().ends_with("\r\n\r\n/slow"));
+}
+
+fn ok_reply() -> Reply {
+    Reply {
+        status: 200,
+        content_type: "text/plain",
+        headers: Vec::new(),
+        body: "ok".into(),
+    }
+}
+
+#[tokio::test]
+async fn async_route_lifetime_replaces_the_five_second_connection_cap() {
+    let listener = Listener::bind_async(
+        "127.0.0.1:0",
+        |request| async move {
+            if request.path == "/slow" {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            ok_reply()
+        },
+        Duration::from_millis(300),
+    )
+    .await
+    .unwrap();
+    let address = listener.local_addr();
+    // An idle connection closes once the lifetime passes.
+    let start = std::time::Instant::now();
+    let mut idle = TcpStream::connect(address).await.unwrap();
+    let mut bytes = Vec::new();
+    let result = tokio::time::timeout(Duration::from_secs(3), idle.read_to_end(&mut bytes))
+        .await
+        .unwrap();
+    assert!(result.is_ok() || result.unwrap_err().kind() == std::io::ErrorKind::ConnectionReset);
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+    // A request still running at the deadline is cut without a response.
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(b"GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut bytes = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut bytes))
+        .await
+        .unwrap();
+    assert!(bytes.is_empty(), "{}", String::from_utf8_lossy(&bytes));
+    listener.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn async_route_lifetime_above_five_seconds_keeps_the_connection_open() {
+    let listener = Listener::bind_async(
+        "127.0.0.1:0",
+        |_| async { ok_reply() },
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
+    let mut idle = TcpStream::connect(listener.local_addr()).await.unwrap();
+    let mut byte = [0; 1];
+    // The synchronous constructors close an idle connection after five seconds; this one stays open.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(5500), idle.read(&mut byte))
+            .await
+            .is_err()
+    );
+    listener.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn async_route_rejects_absolute_https_targets_on_cleartext() {
+    let listener = Listener::bind_async(
+        "127.0.0.1:0",
+        |_| async { ok_reply() },
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    // RFC 9110 §7.4: the sync routes answer 421 for this target, so the async route does too.
+    let response = request(
+        listener.local_addr(),
+        "GET https://localhost/p HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert!(
+        response.starts_with("HTTP/1.1 421 Misdirected Request\r\n"),
+        "{response}"
+    );
+    listener.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn async_route_invalid_reply_is_a_500_not_a_panic() {
+    let listener = Listener::bind_async(
+        "127.0.0.1:0",
+        |request| async move {
+            let mut reply = ok_reply();
+            match request.path.as_str() {
+                "/status" => reply.status = 99,
+                "/type" => reply.content_type = "text/plain\nx",
+                "/name" => reply.headers = vec![("bad name", "v")],
+                "/value" => reply.headers = vec![("x-a", "v\r\nx-b: w")],
+                _ => {}
+            }
+            reply
+        },
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    let address = listener.local_addr();
+    for path in ["/status", "/type", "/name", "/value"] {
+        let response = request(
+            address,
+            &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+        )
+        .await;
+        assert!(
+            response.starts_with("HTTP/1.1 500 Internal Server Error\r\n"),
+            "{path}: {response}"
+        );
+    }
+    // The route still serves valid replies afterwards.
+    let response = request(
+        address,
+        "GET /fine HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    listener.shutdown().await.unwrap();
 }

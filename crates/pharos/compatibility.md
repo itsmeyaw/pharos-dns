@@ -182,7 +182,7 @@
 
 - [pprof Plugin notes](../crates/pharos-plugins/src/pprof/README.md)
 - Endpoints: `/debug/pprof/` (index), `profile`, `cmdline` and `symbol` are served; `/debug/pprof` redirects with 302. Go-only profiles (`allocs`, `block`, `goroutine`, `heap`, `mutex`, `threadcreate`) and `trace` return 404, because Rust has no equivalent runtime data.
-- `profile` is a 100 Hz CPU profile in uncompressed pprof protobuf (Go emits gzip); `seconds` must be 1 to 4 because of the 5 s write timeout, as in CoreDNS, and one profile runs at a time. `symbol` answers GET with `num_symbols: 0` and does not symbolise POSTed addresses.
+- `profile` is a 100 Hz CPU profile in uncompressed pprof protobuf (Go emits gzip) and one profile runs at a time. `seconds` is percent-decoded and defaults to 30 when absent, as in Go; where Go silently uses 30 for an unparsable or non-positive value, Pharos answers 400 `invalid seconds`, and it caps `seconds` at 300 (400 `profile duration too long`), which Go does not. The Listener keeps connections for up to 330 s instead of 5 s so such profiles complete; shutdown and reload still drain for 5 s and cut a longer profile. `symbol` answers GET with `num_symbols: 0` and does not symbolise POSTed addresses.
 - `block [RATE]` is parsed like CoreDNS but ignored (no Rust block profiler); `mutex` is not a property in CoreDNS v1.15.0 and is rejected as unknown.
 - Operational HTTP endpoints allow GET and HEAD only; recognized other methods return 405 and unknown methods return 501. CoreDNS serves the pprof handlers for every method.
 
