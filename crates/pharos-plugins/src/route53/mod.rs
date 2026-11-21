@@ -1,15 +1,21 @@
 //! Authoritative Zones served from AWS Route 53 hosted zones.
 
+mod aws;
+mod serve;
+#[cfg(test)]
+mod serve_tests;
 pub(crate) mod setup;
 #[cfg(test)]
 mod tests;
+mod zones;
+
+pub use serve::Route53;
 
 use pharos_corefile::Fallthrough;
 use pharos_proto::{
     Name,
     zone::{ZoneParser, ZoneRecord},
 };
-use pharos_server::{Context, Next, Outcome, Plugin};
 use std::{future::Future, path::PathBuf, time::Duration};
 
 /// A secret that stays out of `Debug` output.
@@ -37,16 +43,6 @@ pub struct Config {
     pub shared_config_files: Option<Vec<PathBuf>>,
     pub fallthrough: Fallthrough,
     pub refresh: Duration,
-}
-
-/// The `route53` Plugin; serving Route 53 data is not wired yet, so a Query passes to the next Plugin.
-#[derive(Debug)]
-pub struct Route53;
-
-impl Plugin for Route53 {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
-        next.run(cx).await
-    }
 }
 
 /// Where the next page of `ListResourceRecordSets` starts.

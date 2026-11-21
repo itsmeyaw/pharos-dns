@@ -1,13 +1,18 @@
-use super::{Config, Secret};
+use super::{Config, Route53, Secret};
 use pharos_corefile::{BlockContext, Cursor, Error, Fallthrough};
 use std::{path::PathBuf, time::Duration};
 
 pub(crate) fn setup(
     cursor: &mut Cursor<'_>,
-    _block: &mut BlockContext<crate::Chain>,
+    block: &mut BlockContext<crate::Chain>,
 ) -> Result<(), Error> {
-    parse(cursor, load_config_from_env())?;
-    Err(cursor.error("route53: serving Route 53 data is not implemented yet"))
+    let configs = parse(cursor, load_config_from_env())?;
+    // CoreDNS v1.15.0 plugin/route53/setup.go setup: a failing client, hosted zone check or first load fails setup with the plugin name.
+    let route53 = Route53::start(configs)
+        .map_err(|error| cursor.error(format!("plugin/route53: {error}")))?;
+    route53.register_hooks(&mut block.config.lifecycle);
+    block.config.route53 = Some(route53);
+    Ok(())
 }
 
 // CoreDNS v1.15.0 plugin/route53/setup.go setup: strconv.ParseBool(os.Getenv("AWS_SDK_LOAD_CONFIG")), an error counting as false.
