@@ -75,7 +75,8 @@ pub mod header;
     feature = "plugin-kubernetes",
     feature = "plugin-cancel",
     feature = "plugin-timeouts",
-    feature = "plugin-erratic"
+    feature = "plugin-erratic",
+    feature = "plugin-trace"
 ))]
 pub mod health;
 #[cfg(feature = "plugin-hosts")]
@@ -158,6 +159,8 @@ pub mod template;
 pub mod timeouts;
 #[cfg(feature = "plugin-tls")]
 pub mod tls;
+#[cfg(feature = "plugin-trace")]
+pub mod trace;
 #[cfg(feature = "plugin-transfer")]
 pub mod transfer;
 #[cfg(feature = "plugin-tsig")]
