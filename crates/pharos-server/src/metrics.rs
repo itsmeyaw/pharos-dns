@@ -12,9 +12,11 @@ use std::{
 mod grpc;
 mod kubernetes;
 mod template;
+mod trace;
 pub use grpc::GrpcMetrics;
 pub use kubernetes::{KubernetesMetrics, KubernetesRequestMetrics};
 pub use template::{TemplateFailureMetrics, TemplateMetrics};
+pub use trace::TraceMetrics;
 
 // IANA DNS Parameters §Resource Record (RR) TYPEs: these values identify DNS query types.
 const TYPES: &[(u16, &str)] = &[
@@ -87,6 +89,7 @@ struct RegistryInner {
     kubernetes: KubernetesMetrics,
     template: template::TemplateRegistry,
     grpc: grpc::GrpcRegistry,
+    trace: Arc<trace::TraceCounters>,
 }
 
 #[derive(Default)]
@@ -649,6 +652,7 @@ impl Registry {
             kubernetes: KubernetesMetrics::default(),
             template: template::TemplateRegistry::default(),
             grpc: grpc::GrpcRegistry::default(),
+            trace: Arc::default(),
         }))
     }
 
@@ -799,6 +803,11 @@ impl Registry {
         self.0.grpc.resolve(to)
     }
 
+    /// Register and share the `trace` Plugin's span counters.
+    pub fn trace(&self) -> TraceMetrics {
+        TraceMetrics::shared(&self.0.trace)
+    }
+
     /// Register and share forward's unlabelled counters.
     pub fn forward(&self) -> ForwardMetrics {
         self.0.forward_enabled.store(true, Ordering::Relaxed);
@@ -860,6 +869,7 @@ impl Registry {
         self.0.kubernetes.encode(out);
         self.0.template.encode(out);
         self.0.grpc.encode(out);
+        self.0.trace.encode(out);
         let shed = self.0.shed.lock().unwrap();
         if !shed.is_empty() {
             header(
