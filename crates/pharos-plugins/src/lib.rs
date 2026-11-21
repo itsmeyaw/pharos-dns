@@ -30,6 +30,8 @@ pub mod any;
 pub mod auto;
 #[cfg(feature = "plugin-autopath")]
 pub mod autopath;
+#[cfg(feature = "plugin-azure")]
+pub mod azure;
 #[cfg(feature = "plugin-bind")]
 pub mod bind;
 #[cfg(feature = "plugin-bufsize")]
@@ -71,6 +73,7 @@ pub mod header;
     feature = "plugin-hosts",
     feature = "plugin-file",
     feature = "plugin-auto",
+    feature = "plugin-azure",
     feature = "plugin-loadbalance",
     feature = "plugin-kubernetes",
     feature = "plugin-cancel",
@@ -121,6 +124,7 @@ pub mod siit;
     feature = "plugin-file",
     feature = "plugin-secondary",
     feature = "plugin-auto",
+    feature = "plugin-azure",
     feature = "plugin-sign",
     feature = "plugin-dynupdate",
     feature = "plugin-route53"
