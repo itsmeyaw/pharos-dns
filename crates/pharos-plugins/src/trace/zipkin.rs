@@ -2,12 +2,10 @@
 
 use std::{fmt::Write, net::IpAddr};
 
-use pharos_server::Protocol;
-
-use super::span::{SpanRecord, hex_id};
+use super::span::{SpanRecord, hex_id, proto};
 
 // CoreDNS v1.15.0 plugin/trace/trace.go defaultTopLevelSpanName.
-const SPAN_NAME: &str = "servedns";
+pub(super) const SPAN_NAME: &str = "servedns";
 // CoreDNS v1.15.0 plugin/trace/trace.go tagByProvider["default"].
 const TAG_NAME: &str = "coredns.io/name";
 const TAG_TYPE: &str = "coredns.io/type";
@@ -118,15 +116,7 @@ pub(super) fn encode<'a>(
             );
             tag(out, &mut first, TAG_TYPE, &span.qtype.to_string());
         }
-        tag(
-            out,
-            &mut first,
-            TAG_PROTO,
-            match span.protocol {
-                Protocol::Udp => "udp",
-                Protocol::Tcp => "tcp",
-            },
-        );
+        tag(out, &mut first, TAG_PROTO, proto(span.protocol));
         tag(out, &mut first, TAG_REMOTE, &span.remote.to_string());
         if let Some(rcode) = span.rcode {
             tag(out, &mut first, TAG_RCODE, &rcode.to_string());

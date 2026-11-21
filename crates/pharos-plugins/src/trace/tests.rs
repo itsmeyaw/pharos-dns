@@ -643,6 +643,23 @@ mod serve {
         assert_eq!(id, "");
     }
 
+    // dd-trace-go v2.10.1 TraceID() and rand.go: the Datadog trace ID is 32 hex digits and span IDs are positive 63-bit integers.
+    #[tokio::test]
+    async fn datadog_trace_id_metadata_is_the_128_bit_id() {
+        let (trace, queue, _) = plugin("trace datadog localhost:8126");
+        for _ in 0..50 {
+            let (_, id) = run(&trace, Outcome::Response, response(0), true).await;
+            let spans = drain(&queue);
+            assert_eq!(id.len(), 32);
+            assert_eq!(&id[16..], format!("{:016x}", spans[0].id));
+            assert_eq!(
+                &id[..16],
+                format!("{:08x}00000000", spans[0].start_micros / 1_000_000)
+            );
+            assert!(spans[0].id != 0 && spans[0].id <= i64::MAX as u64);
+        }
+    }
+
     #[test]
     fn full_queue_disposes_the_oldest_span_and_counts_it() {
         let metrics = TraceMetrics::default();

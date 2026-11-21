@@ -21,7 +21,7 @@ use tokio::{
 };
 
 use super::{
-    Config, EndpointType,
+    Config, EndpointType, datadog,
     queue::Queue,
     span::SpanRecord,
     zipkin::{self, local_endpoint},
@@ -120,13 +120,12 @@ impl Transport {
         Ok(Self { target, tls })
     }
 
-    async fn send(&self, method: &str, content_type: &str, body: &[u8]) -> io::Result<u16> {
+    async fn send(&self, method: &str, headers: &str, body: &[u8]) -> io::Result<u16> {
         let tcp = TcpStream::connect((self.target.host.as_str(), self.target.port)).await?;
         tcp.set_nodelay(true)?;
-        // RFC 9110 §9.3 and §8.3: the method, then the body's media type and length.
-        // zipkin-go reporter/http sendBatch: `b3: 0` keeps a sidecar from tracing the report itself.
+        // RFC 9110 §9.3 and §8.3: the method, the exporter's headers (media type among them), then the body's length.
         let head = format!(
-            "{method} {} HTTP/1.1\r\nHost: {}\r\nb3: 0\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "{method} {} HTTP/1.1\r\nHost: {}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
             self.target.path,
             self.target.authority,
             body.len()
@@ -180,8 +179,13 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
 
 /// How a batch of spans becomes a request body.
 enum Encoder {
-    Zipkin { local_endpoint: Option<String> },
-    // The Datadog agent encoder (msgpack) joins here as the second variant.
+    Zipkin {
+        local_endpoint: Option<String>,
+    },
+    Datadog {
+        service: String,
+        analytics_rate: f64,
+    },
 }
 
 impl Encoder {
@@ -189,13 +193,24 @@ impl Encoder {
         match self {
             // Zipkin v2 API spec: spans are POSTed to /api/v2/spans.
             Self::Zipkin { .. } => "POST",
+            // dd-trace-go v2.10.1 transport.go send: traces are POSTed to /v0.4/traces (the agent also accepts PUT).
+            Self::Datadog { .. } => "POST",
         }
     }
 
-    fn content_type(&self) -> &'static str {
+    /// The header lines of a request carrying `count` spans, each ended by CRLF.
+    fn headers(&self, count: usize) -> String {
         match self {
             // Zipkin v2 API spec: the JSON encoding is application/json.
-            Self::Zipkin { .. } => "application/json",
+            // zipkin-go reporter/http sendBatch: `b3: 0` keeps a sidecar from tracing the report itself.
+            Self::Zipkin { .. } => "b3: 0\r\nContent-Type: application/json\r\n".to_owned(),
+            // dd-trace-go v2.10.1 transport.go datadogHeaders and send: the tracer identity, the trace count and top-level spans marked by the client.
+            Self::Datadog { .. } => format!(
+                "Content-Type: application/msgpack\r\nDatadog-Meta-Lang: rust\r\nDatadog-Meta-Lang-Interpreter: rustc-{}-{}\r\nDatadog-Meta-Tracer-Version: {}\r\nX-Datadog-Trace-Count: {count}\r\nDatadog-Client-Computed-Top-Level: t\r\n",
+                std::env::consts::ARCH,
+                std::env::consts::OS,
+                env!("CARGO_PKG_VERSION"),
+            ),
         }
     }
 
@@ -206,6 +221,13 @@ impl Encoder {
                 let mut text = String::from_utf8(std::mem::take(out)).unwrap_or_default();
                 zipkin::encode(spans, local_endpoint.as_deref(), &mut text);
                 *out = text.into_bytes();
+            }
+            Self::Datadog {
+                service,
+                analytics_rate,
+            } => {
+                out.clear();
+                datadog::encode(spans.iter(), service, *analytics_rate, out);
             }
         }
     }
@@ -264,13 +286,25 @@ impl Tracer {
                     )
                 })?,
             },
-            EndpointType::Datadog => {
-                return Err(io::Error::other(
-                    "trace: the datadog exporter is not implemented yet",
-                ));
-            }
+            EndpointType::Datadog => Encoder::Datadog {
+                service: config.service_name.clone(),
+                analytics_rate: config.datadog_analytics_rate,
+            },
         };
-        let transport = Transport::new(&config.endpoint)?;
+        let endpoint = match config.endpoint_type {
+            EndpointType::Zipkin => config.endpoint.clone(),
+            EndpointType::Datadog => datadog::traces_url(&config.endpoint),
+        };
+        let transport = Transport::new(&endpoint)?;
+        // CoreDNS v1.15.0 plugin/trace/setup.go OnStartup: only the Zipkin reporter reads the zipkin_max_* settings.
+        let (backlog_setting, batch_setting, interval_setting) = match config.endpoint_type {
+            EndpointType::Zipkin => (
+                config.zipkin_max_backlog_size,
+                config.zipkin_max_batch_size,
+                config.zipkin_max_batch_interval,
+            ),
+            EndpointType::Datadog => (0, 0, Duration::ZERO),
+        };
         // zipkin-go reporter/http options: a zero or negative setting keeps the default.
         let positive = |value: i64, default: usize| {
             usize::try_from(value)
@@ -278,12 +312,12 @@ impl Tracer {
                 .filter(|&n| n > 0)
                 .unwrap_or(default)
         };
-        let batch_size = positive(config.zipkin_max_batch_size, DEFAULT_BATCH_SIZE);
-        let backlog = positive(config.zipkin_max_backlog_size, DEFAULT_BACKLOG);
-        let interval = if config.zipkin_max_batch_interval.is_zero() {
+        let batch_size = positive(batch_setting, DEFAULT_BATCH_SIZE);
+        let backlog = positive(backlog_setting, DEFAULT_BACKLOG);
+        let interval = if interval_setting.is_zero() {
             DEFAULT_BATCH_INTERVAL
         } else {
-            config.zipkin_max_batch_interval
+            interval_setting
         };
         let queue = Arc::new(Queue::new(backlog, batch_size, metrics.clone()));
         let task = tokio::spawn(run(
@@ -356,7 +390,7 @@ async fn run(
                 // zipkin-go reporter/http sendBatch: the request is bounded by a timeout and a failed batch is not retried here.
                 let result = timeout(
                     REQUEST_TIMEOUT,
-                    transport.send(encoder.method(), encoder.content_type(), &body),
+                    transport.send(encoder.method(), &encoder.headers(spare.len()), &body),
                 )
                 .await;
                 let failure = match result {

@@ -32,6 +32,14 @@ pub(super) fn hex_id(id: u64, out: &mut [u8; 16]) -> &str {
     std::str::from_utf8(out).expect("hex digits are ASCII")
 }
 
+// CoreDNS v1.15.0 request/request.go Proto: the transport protocol of the Query.
+pub(super) fn proto(protocol: Protocol) -> &'static str {
+    match protocol {
+        Protocol::Udp => "udp",
+        Protocol::Tcp => "tcp",
+    }
+}
+
 pub(super) fn unix_micros() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

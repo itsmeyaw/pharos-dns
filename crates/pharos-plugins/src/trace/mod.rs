@@ -1,5 +1,6 @@
-//! Sampled Query tracing exported to a Zipkin collector.
+//! Sampled Query tracing exported to a Zipkin collector or a Datadog agent.
 
+mod datadog;
 mod export;
 mod queue;
 pub(crate) mod setup;
@@ -89,8 +90,15 @@ impl Shared {
             .wrapping_add(GAMMA);
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        let id = z ^ (z >> 31);
+        // dd-trace-go v2.10.1 rand.go generateSpanID: Datadog span IDs are positive 63-bit integers.
+        let id = if self.config.endpoint_type == EndpointType::Datadog {
+            id & i64::MAX as u64
+        } else {
+            id
+        };
         // Zipkin v2 API spec: an ID of zero is not valid.
-        (z ^ (z >> 31)).max(1)
+        id.max(1)
     }
 
     // CoreDNS v1.15.0 plugin/trace/trace.go ServeDNS: every Nth Query is traced and `every 0` traces none.
@@ -171,13 +179,25 @@ impl Plugin for Trace {
             return next.run(cx).await;
         }
         let id = shared.next_id();
+        let (start, started) = (Instant::now(), unix_micros());
         // CoreDNS v1.15.0 plugin/trace/trace.go: metadata `trace/traceid` is the trace ID of the Query.
         if cx.metadata.enabled() {
-            let mut hex = [0; 16];
-            cx.metadata
-                .insert_copied(TRACE_ID_METADATA, hex_id(id, &mut hex));
+            match shared.config.endpoint_type {
+                EndpointType::Zipkin => {
+                    let mut hex = [0; 16];
+                    cx.metadata
+                        .insert_copied(TRACE_ID_METADATA, hex_id(id, &mut hex));
+                }
+                // dd-trace-go v2.10.1 TraceID(): the 128-bit ID as 32 hex digits.
+                EndpointType::Datadog => {
+                    let mut hex = [0; 32];
+                    cx.metadata.insert_copied(
+                        TRACE_ID_METADATA,
+                        datadog::hex_trace_id(started, id, &mut hex),
+                    );
+                }
+            }
         }
-        let (start, started) = (Instant::now(), unix_micros());
         let outcome = next.run(cx).await;
         let span = SpanRecord::capture(id, started, start.elapsed(), cx, &outcome);
         if let Some(tracer) = &*shared.tracer.load() {
