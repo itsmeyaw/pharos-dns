@@ -13,6 +13,11 @@
 - Pharos never makes Query serving or Reload wait for a command. CoreDNS runs a blocking command inline, so a hung command stalls the event; Pharos runs `startup` commands, blocking or not, in the background, and several of them run concurrently rather than one after another. A blocking command's non-zero exit status, or a failure to start, is logged as an error; for `&` commands only a failure to start is.
 - `shutdown` waits for a blocking command, as CoreDNS does, but for at most five seconds; then Pharos kills it, logs an error and goes on. `shutdown` commands ending in `&` are not waited for and may be cut short by process exit.
 - CoreDNS logs a random ID per hook; Pharos logs the command line instead.
+- If another Plugin's `Started` hook fails after `on` ran, `startup` commands have already started although the Reload fails; CoreDNS emits the event only after a successful Reload. No such hook can fail today.
+
+## Differential scenarios
+
+None: `on` changes no DNS Response, so there is nothing to compare with CoreDNS. Process-level tests in `crates/pharos/tests/on.rs` cover each event around startup, Reload and shutdown.
 
 ## Sources
 
