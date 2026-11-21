@@ -8,6 +8,8 @@ pub(crate) fn setup(
     // shortcut: a block with keys on several ports reports the first key's port, split the block's ports when a collector needs each.
     let port = block.keys().first().map_or("", |key| key.port.as_str());
     let config = trace::parse(cursor, &block.listen_addresses, port)?;
-    block.config.trace = Some(trace::Trace::new(config));
+    let trace = trace::Trace::new(config);
+    trace.register_hooks(&mut block.config.lifecycle);
+    block.config.trace = Some(trace);
     Ok(())
 }

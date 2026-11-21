@@ -1,17 +1,39 @@
 //! Sampled Query tracing exported to a Zipkin collector.
 
+mod export;
+mod queue;
 pub(crate) mod setup;
+mod span;
 #[cfg(test)]
 mod tests;
+mod zipkin;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    fmt, io,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
+use arc_swap::ArcSwapOption;
 use pharos_corefile::{Cursor, Error};
-use pharos_server::{Context, Next, Outcome, Plugin};
+use pharos_server::{
+    Context, Lifecycle, Next, Outcome, Phase, Plugin,
+    metrics::{Registry, TraceMetrics},
+};
+
+use self::{
+    export::Tracer,
+    span::{SpanRecord, hex_id, unix_micros},
+};
 
 // CoreDNS v1.15.0 plugin/trace/setup.go supportedProviders: the default endpoint of each type.
 const ZIPKIN_ENDPOINT: &str = "localhost:9411";
 const DATADOG_ENDPOINT: &str = "localhost:8126";
+// CoreDNS v1.15.0 plugin/trace/trace.go metaTraceIdKey.
+const TRACE_ID_METADATA: &str = "trace/traceid";
 // CoreDNS v1.15.0 plugin/trace/setup.go defServiceName.
 const DEFAULT_SERVICE: &str = "coredns";
 
@@ -36,27 +58,132 @@ pub(crate) struct Config {
     pub zipkin_max_batch_interval: Duration,
 }
 
-#[derive(Debug)]
+struct Shared {
+    config: Config,
+    count: AtomicU64,
+    ids: AtomicU64,
+    tracer: ArcSwapOption<Tracer>,
+    metrics: OnceLock<TraceMetrics>,
+}
+
+/// The `trace` Plugin: it samples Queries and exports them as spans.
 pub struct Trace {
-    config: Arc<Config>,
+    shared: Arc<Shared>,
+}
+
+impl fmt::Debug for Trace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Trace")
+            .field("config", &self.shared.config)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Shared {
+    // zipkin-go StartSpan draws IDs from a PRNG; a seeded SplitMix64 stream avoids a syscall per sampled Query.
+    fn next_id(&self) -> u64 {
+        const GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut z = self
+            .ids
+            .fetch_add(GAMMA, Ordering::Relaxed)
+            .wrapping_add(GAMMA);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        // Zipkin v2 API spec: an ID of zero is not valid.
+        (z ^ (z >> 31)).max(1)
+    }
+
+    // CoreDNS v1.15.0 plugin/trace/trace.go ServeDNS: every Nth Query is traced and `every 0` traces none.
+    fn sampled(&self) -> bool {
+        self.config.every != 0
+            && self
+                .count
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1)
+                .is_multiple_of(self.config.every)
+    }
+
+    // CoreDNS v1.15.0 plugin/trace/trace.go OnStartup: the tracer is built once, here after a Reload failed it is built again.
+    async fn start(&self) -> io::Result<()> {
+        if self.tracer.load().is_some() {
+            return Ok(());
+        }
+        let metrics = self.metrics.get().cloned().unwrap_or_default();
+        let tracer = Tracer::start(&self.config, metrics).await?;
+        self.tracer.store(Some(Arc::new(tracer)));
+        Ok(())
+    }
+
+    async fn stop(&self) {
+        if let Some(tracer) = self.tracer.swap(None) {
+            tracer.stop().await;
+        }
+    }
 }
 
 impl Trace {
     pub(crate) fn new(config: Config) -> Self {
+        let mut seed = [0; 8];
+        // getrandom failing leaves a fixed seed: IDs stay valid, only less unpredictable.
+        let _ = getrandom::getrandom(&mut seed);
         Self {
-            config: Arc::new(config),
+            shared: Arc::new(Shared {
+                config,
+                count: AtomicU64::new(0),
+                ids: AtomicU64::new(u64::from_le_bytes(seed)),
+                tracer: ArcSwapOption::empty(),
+                metrics: OnceLock::new(),
+            }),
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn config(&self) -> &Config {
-        &self.config
+    /// Record span counters in the process-wide registry.
+    pub(crate) fn set_metrics(&self, registry: &Registry) {
+        let _ = self.shared.metrics.set(registry.trace());
+    }
+
+    /// Start the exporter with the Server, flush it on Restart and Shutdown, and restore it if a Reload fails.
+    pub(crate) fn register_hooks(&self, lifecycle: &mut Lifecycle) {
+        let shared = Arc::clone(&self.shared);
+        let start = move || {
+            let shared = Arc::clone(&shared);
+            async move { shared.start().await }
+        };
+        lifecycle.register(Phase::Startup, start.clone());
+        lifecycle.register(Phase::RestartFailed, start);
+        let shared = Arc::clone(&self.shared);
+        let stop = move || {
+            let shared = Arc::clone(&shared);
+            async move {
+                shared.stop().await;
+                Ok(())
+            }
+        };
+        lifecycle.register(Phase::Restart, stop.clone());
+        lifecycle.register(Phase::Shutdown, stop);
     }
 }
 
 impl Plugin for Trace {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
-        next.run(cx).await
+        let shared = &*self.shared;
+        if !shared.sampled() || shared.tracer.load().is_none() {
+            return next.run(cx).await;
+        }
+        let id = shared.next_id();
+        // CoreDNS v1.15.0 plugin/trace/trace.go: metadata `trace/traceid` is the trace ID of the Query.
+        if cx.metadata.enabled() {
+            let mut hex = [0; 16];
+            cx.metadata
+                .insert_copied(TRACE_ID_METADATA, hex_id(id, &mut hex));
+        }
+        let (start, started) = (Instant::now(), unix_micros());
+        let outcome = next.run(cx).await;
+        let span = SpanRecord::capture(id, started, start.elapsed(), cx, &outcome);
+        if let Some(tracer) = &*shared.tracer.load() {
+            tracer.record(span);
+        }
+        outcome
     }
 }
 

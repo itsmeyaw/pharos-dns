@@ -734,6 +734,10 @@ pub fn servers_with_registry(
         if let Some(hosts) = &block.config.hosts {
             hosts.set_metrics(&metrics);
         }
+        #[cfg(feature = "plugin-trace")]
+        if let Some(trace) = &block.config.trace {
+            trace.set_metrics(&metrics);
+        }
         #[cfg(feature = "plugin-kubernetes")]
         if let Some(kubernetes) = &block.config.kubernetes {
             kubernetes.set_metrics(&metrics);
