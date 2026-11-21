@@ -239,6 +239,17 @@ mod minimal {
     mod minimal_allocations;
 }
 
+#[cfg(all(
+    feature = "plugin-geoip",
+    feature = "plugin-metadata",
+    feature = "plugin-whoami"
+))]
+#[path = "allocations"]
+mod geoip {
+    #[path = "geoip_allocations.rs"]
+    mod cases;
+}
+
 #[path = "allocations"]
 mod nsid {
     #[path = "nsid_allocations.rs"]

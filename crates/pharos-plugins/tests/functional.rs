@@ -260,6 +260,13 @@ mod local {
     mod local_debug;
 }
 
+#[cfg(feature = "plugin-geoip")]
+#[path = "functional"]
+mod geoip {
+    #[path = "geoip.rs"]
+    mod cases;
+}
+
 #[path = "functional"]
 mod log {
     #[path = "log_outcomes.rs"]
