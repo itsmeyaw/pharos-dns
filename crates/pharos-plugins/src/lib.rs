@@ -139,6 +139,8 @@ pub use log::format as log_format;
 pub mod r#loop;
 #[cfg(feature = "plugin-metadata")]
 pub mod metadata;
+#[cfg(feature = "plugin-pprof")]
+pub mod pprof;
 #[cfg(feature = "plugin-prometheus")]
 pub mod prometheus;
 #[cfg(feature = "plugin-proxyproto")]
@@ -547,6 +549,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("minimal", include_str!("minimal/README.md")),
     ("multisocket", include_str!("multisocket/README.md")),
     ("nsid", include_str!("nsid/README.md")),
+    ("pprof", include_str!("pprof/README.md")),
     ("prometheus", include_str!("prometheus/README.md")),
     ("proxyproto", include_str!("proxyproto/README.md")),
     ("quic", include_str!("quic/README.md")),
@@ -569,6 +572,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
 
 #[cfg(any(
     feature = "plugin-health",
+    feature = "plugin-pprof",
     feature = "plugin-prometheus",
     feature = "plugin-ready"
 ))]
@@ -666,6 +670,8 @@ pub fn servers_with_registry(
     metrics.enable_health_metrics();
     #[cfg(feature = "plugin-prometheus")]
     let mut exporters = std::collections::BTreeMap::new();
+    #[cfg(feature = "plugin-pprof")]
+    let mut pprof_addresses: Vec<(String, Option<i64>)> = Vec::new();
     #[cfg(feature = "plugin-ready")]
     let ready_state = Arc::new(ready::State::default());
     #[cfg(feature = "plugin-ready")]
@@ -764,6 +770,14 @@ pub fn servers_with_registry(
                 .any(|(address, _)| *address == health.address)
         {
             health_addresses.push((health.address.clone(), health.lameduck));
+        }
+        #[cfg(feature = "plugin-pprof")]
+        if let Some(pprof) = &block.config.pprof
+            && !pprof_addresses
+                .iter()
+                .any(|(address, _)| *address == pprof.address)
+        {
+            pprof_addresses.push((pprof.address.clone(), pprof.block_rate));
         }
         #[cfg(feature = "plugin-ready")]
         if let Some(ready) = &block.config.ready {
@@ -1212,6 +1226,47 @@ pub fn servers_with_registry(
                 Ok(())
             }
         });
+    }
+    #[cfg(feature = "plugin-pprof")]
+    for (address, block_rate) in pprof_addresses {
+        let listener = Arc::new(std::sync::Mutex::new(None::<pharos_server::http::Listener>));
+        let startup_listener = Arc::clone(&listener);
+        let start = move || {
+            let address = address.clone();
+            let listener = Arc::clone(&startup_listener);
+            async move {
+                if listener.lock().unwrap().is_some() {
+                    return Ok(());
+                }
+                let server =
+                    pharos_server::http::Listener::bind_async(&address, pprof::http::route).await?;
+                if let Some(rate) = block_rate {
+                    // CoreDNS v1.15.0 plugin/pprof/pprof.go: runtime.SetBlockProfileRate has no Rust equivalent.
+                    pharos_server::logging::log(
+                        "INFO",
+                        "pprof",
+                        &format!(
+                            "block profiling rate {rate} accepted but ignored: Pharos has no block profiler"
+                        ),
+                    );
+                }
+                *listener.lock().unwrap() = Some(server);
+                Ok(())
+            }
+        };
+        lifecycle.register(pharos_server::Phase::Startup, start.clone());
+        lifecycle.register(pharos_server::Phase::RestartFailed, start);
+        let stop = move || {
+            let server = listener.lock().unwrap().take();
+            async move {
+                if let Some(server) = server {
+                    server.shutdown().await?;
+                }
+                Ok(())
+            }
+        };
+        lifecycle.register(pharos_server::Phase::Restart, stop.clone());
+        lifecycle.register(pharos_server::Phase::Shutdown, stop);
     }
     #[cfg(feature = "plugin-ready")]
     for address in ready_addresses {
