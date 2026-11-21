@@ -1,6 +1,8 @@
 //! Authoritative Zones served from AWS Route 53 hosted zones.
 
 pub(crate) mod setup;
+#[cfg(test)]
+mod tests;
 
 use pharos_corefile::Fallthrough;
 use pharos_server::{Context, Next, Outcome, Plugin};
