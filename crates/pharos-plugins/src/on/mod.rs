@@ -6,9 +6,10 @@ mod shlex;
 mod tests;
 
 use std::{
+    future::{Future, pending},
     process::Stdio,
     sync::{
-        Arc,
+        Arc, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -16,7 +17,7 @@ use std::{
 
 use pharos_corefile::{Cursor, Error};
 use pharos_server::{Lifecycle, Phase, logging};
-use tokio::{process::Command, time::timeout};
+use tokio::{process::Command, sync::oneshot, task::JoinHandle, time::timeout};
 
 // Pharos policy: a hung `shutdown` command may delay process exit by at most this long.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
@@ -80,6 +81,36 @@ pub fn parse(cursor: &mut Cursor<'_>) -> Result<Vec<Hook>, Error> {
     Ok(hooks)
 }
 
+/// Blocking `startup` commands of one hook that are still running.
+#[derive(Default)]
+struct Children(Mutex<Vec<(oneshot::Sender<()>, JoinHandle<()>)>>);
+
+impl Children {
+    fn spawn(&self, hook: &Arc<Hook>) {
+        let (stop, stopped) = oneshot::channel();
+        let hook = Arc::clone(hook);
+        let handle =
+            tokio::spawn(async move { hook.execute(false, async { _ = stopped.await }).await });
+        let mut running = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        running.retain(|(_, handle)| !handle.is_finished());
+        running.push((stop, handle));
+    }
+
+    async fn kill_all(&self) {
+        let running = std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner));
+        let handles: Vec<_> = running
+            .into_iter()
+            .map(|(stop, handle)| {
+                _ = stop.send(());
+                handle
+            })
+            .collect();
+        for handle in handles {
+            _ = handle.await;
+        }
+    }
+}
+
 impl Hook {
     // coredns/caddy v1.1.4 onevent/hook/hook.go: a trailing `&` argument means non-blocking.
     fn background(&self) -> bool {
@@ -98,8 +129,8 @@ impl Hook {
             .join(" ")
     }
 
-    /// Start the command directly (no shell) and wait for it, logging failures.
-    async fn execute(&self, kill_on_drop: bool) {
+    /// Start the command directly (no shell) and wait for it, logging failures; `stop` kills and reaps it.
+    async fn execute(&self, kill_on_drop: bool, stop: impl Future<Output = ()>) {
         let mut command = Command::new(&self.command);
         // coredns/caddy v1.1.4 onevent/hook/hook.go: the child shares stdin, stdout and stderr.
         command
@@ -120,11 +151,15 @@ impl Hook {
         );
         let failure = match command.spawn() {
             Err(error) => Some(error.to_string()),
-            Ok(mut child) => match child.wait().await {
-                Err(error) => Some(error.to_string()),
-                // coredns/caddy v1.1.4 onevent/hook/hook.go: only a blocking command's exit status is an error.
-                Ok(status) if blocking && !status.success() => Some(status.to_string()),
-                Ok(_) => None,
+            Ok(mut child) => tokio::select! {
+                waited = child.wait() => match waited {
+                    Err(error) => Some(error.to_string()),
+                    // coredns/caddy v1.1.4 onevent/hook/hook.go: only a blocking command's exit status is an error.
+                    Ok(status) if blocking && !status.success() => Some(status.to_string()),
+                    Ok(_) => None,
+                },
+                // Pharos policy: `kill` waits for the child, so none is left running or unreaped.
+                () = stop => child.kill().await.err().map(|error| error.to_string()),
             },
         };
         if let Some(failure) = failure {
@@ -142,12 +177,29 @@ impl Hook {
         match hook.event {
             // coredns/caddy v1.1.4 plugins.go: CoreDNS never emits `certrenew`, so it registers nothing.
             Event::CertRenew => {}
-            // coredns/caddy v1.1.4 caddy.go: InstanceStartupEvent follows the listeners, on Reload too.
-            Event::Startup => lifecycle.register_sync(Phase::Started, move || {
-                let hook = Arc::clone(&hook);
-                tokio::spawn(async move { hook.execute(false).await });
-                Ok(())
-            }),
+            Event::Startup => {
+                let children = Arc::new(Children::default());
+                let running = Arc::clone(&children);
+                // coredns/caddy v1.1.4 caddy.go: InstanceStartupEvent follows the old instance's shutdown, on Reload too.
+                lifecycle.register_sync(Phase::InstanceStartup, move || {
+                    if hook.background() {
+                        // coredns/caddy v1.1.4 onevent/hook/hook.go: a `&` command is never stopped by the server.
+                        let hook = Arc::clone(&hook);
+                        tokio::spawn(async move { hook.execute(false, pending()).await });
+                    } else {
+                        running.spawn(&hook);
+                    }
+                    Ok(())
+                });
+                // Pharos policy: a blocking `startup` command still running when its instance stops is killed.
+                lifecycle.register(Phase::Shutdown, move || {
+                    let children = Arc::clone(&children);
+                    async move {
+                        children.kill_all().await;
+                        Ok(())
+                    }
+                });
+            }
             Event::Shutdown => {
                 // coredns/caddy v1.1.4 sigtrap.go: ShutdownEvent fires on process exit, not on Reload.
                 let reloading = Arc::new(AtomicBool::new(false));
@@ -166,8 +218,11 @@ impl Hook {
                             return Ok(());
                         }
                         if hook.background() {
-                            tokio::spawn(async move { hook.execute(false).await });
-                        } else if timeout(SHUTDOWN_WAIT, hook.execute(true)).await.is_err() {
+                            tokio::spawn(async move { hook.execute(false, pending()).await });
+                        } else if timeout(SHUTDOWN_WAIT, hook.execute(true, pending()))
+                            .await
+                            .is_err()
+                        {
                             logging::log(
                                 "ERROR",
                                 "on",

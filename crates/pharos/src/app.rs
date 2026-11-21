@@ -299,6 +299,10 @@ async fn reload(
             logging::log("ERROR", "", &format!("Reload shutdown: {error}"));
         }
         *lifecycle = next;
+        // CoreDNS caddy v1.1.4 caddy.go:253-266: InstanceStartupEvent follows the old instance's shutdown.
+        if let Err(error) = lifecycle.run(Phase::InstanceStartup).await {
+            logging::log("ERROR", "", &format!("Reload startup: {error}"));
+        }
         Ok((reload_config, hash))
     }
     .await;
@@ -417,6 +421,9 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
         .run(Phase::Started)
         .await
         .map_err(|e| (1, e.to_string()))?;
+    if let Err(error) = lifecycle.run(Phase::InstanceStartup).await {
+        logging::log("ERROR", "", &format!("Startup: {error}"));
+    }
     if !options.quiet {
         for (address, domains) in domains {
             print!(

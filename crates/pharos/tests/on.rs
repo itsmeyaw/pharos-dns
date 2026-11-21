@@ -174,3 +174,45 @@ fn bad_commands_do_not_block_serving_or_reload() {
         thread::sleep(Duration::from_millis(10));
     }
 }
+
+// coredns/caddy v1.1.4 caddy.go:253-266: the new instance's `startup` runs after the old instance has stopped,
+// and a hung blocking `startup` command is killed with its instance.
+#[test]
+fn reload_stops_the_old_startup_command_before_the_new_one_starts() {
+    let mut server = Server::start("order", |dir| {
+        let script = dir.join("hook.sh");
+        fs::write(
+            &script,
+            format!(
+                "for p in $(cat {0}/pids 2>/dev/null); do kill -0 $p 2>/dev/null && echo alive >> {0}/alive; done\necho $$ >> {0}/pids\nexec sleep 30\n",
+                dir.display()
+            ),
+        )
+        .unwrap();
+        format!(" on startup sh {}", script.display())
+    });
+    let pids = server.dir.join("pids");
+    wait_for(&pids, 1);
+    fs::write(
+        &server.corefile,
+        fs::read_to_string(&server.corefile)
+            .unwrap()
+            .replace("whoami", "errors"),
+    )
+    .unwrap();
+    server.signal("-USR1");
+    wait_for(&pids, 2);
+    assert!(!server.dir.join("alive").exists());
+    server.signal("-TERM");
+    assert!(server.wait_exit().success());
+    for pid in lines(&pids) {
+        assert!(
+            !Command::new("kill")
+                .args(["-0", &pid])
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+}

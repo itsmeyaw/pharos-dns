@@ -122,14 +122,18 @@ fn trailing_ampersand_is_the_only_background_marker() {
     assert_eq!(hook("on shutdown cmd a &").arguments(), ["a"]);
 }
 
+// coredns/caddy v1.1.4 caddy.go: InstanceStartupEvent follows the old instance's shutdown, so not Started.
 #[tokio::test]
-async fn startup_fires_after_listeners_not_at_startup() {
+async fn startup_fires_on_instance_startup_only() {
     let dir = tempfile::tempdir().unwrap();
     let marker = dir.path().join("startup");
     let lifecycle = lifecycle(&format!("on startup touch {}", marker.display()));
-    lifecycle.run(Phase::Startup).await.unwrap();
+    for phase in [Phase::Startup, Phase::Started] {
+        lifecycle.run(phase).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(!marker.exists());
-    lifecycle.run(Phase::Started).await.unwrap();
+    lifecycle.run(Phase::InstanceStartup).await.unwrap();
     assert!(appears(&marker).await);
 }
 
@@ -138,10 +142,64 @@ async fn startup_runs_once_per_lifecycle_run() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("log");
     let lifecycle = lifecycle(&format!("on startup sh -c 'echo x >> {}'", log.display()));
-    lifecycle.run(Phase::Started).await.unwrap();
+    lifecycle.run(Phase::InstanceStartup).await.unwrap();
     assert!(appears(&log).await);
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(std::fs::read_to_string(&log).unwrap(), "x\n");
+}
+
+async fn pid_of(path: &Path) -> String {
+    for _ in 0..200 {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && text.ends_with('\n')
+        {
+            return text.trim().to_owned();
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("{path:?} never got a pid");
+}
+
+fn alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+// Pharos policy: a hung blocking `startup` command dies with its instance, so Reloads cannot pile them up.
+#[tokio::test]
+async fn hung_blocking_startup_command_is_killed_at_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("pid");
+    let lifecycle = lifecycle(&format!(
+        "on startup sh -c 'echo $$ > {}; exec sleep 30'",
+        pidfile.display()
+    ));
+    lifecycle.run(Phase::InstanceStartup).await.unwrap();
+    let pid = pid_of(&pidfile).await;
+    assert!(alive(&pid));
+    lifecycle.run(Phase::Shutdown).await.unwrap();
+    assert!(!alive(&pid));
+}
+
+// coredns/caddy v1.1.4 onevent/hook/hook.go: a `&` command is started and never waited for or stopped.
+#[tokio::test]
+async fn background_startup_command_outlives_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("pid");
+    let lifecycle = lifecycle(&format!(
+        "on startup sh -c 'echo $$ > {}; exec sleep 30' &",
+        pidfile.display()
+    ));
+    lifecycle.run(Phase::InstanceStartup).await.unwrap();
+    let pid = pid_of(&pidfile).await;
+    lifecycle.run(Phase::Shutdown).await.unwrap();
+    let survived = alive(&pid);
+    let _ = std::process::Command::new("kill").arg(&pid).status();
+    assert!(survived);
 }
 
 #[tokio::test]
@@ -184,6 +242,7 @@ async fn certrenew_never_fires() {
     for phase in [
         Phase::Startup,
         Phase::Started,
+        Phase::InstanceStartup,
         Phase::Restart,
         Phase::RestartFailed,
         Phase::Shutdown,
@@ -200,17 +259,21 @@ async fn failing_and_missing_commands_do_not_fail_the_lifecycle() {
     let lifecycle = lifecycle(
         "on startup false\non startup pharos-no-such-binary\non shutdown false\non shutdown pharos-no-such-binary",
     );
-    lifecycle.run(Phase::Started).await.unwrap();
+    lifecycle.run(Phase::InstanceStartup).await.unwrap();
     lifecycle.run(Phase::Shutdown).await.unwrap();
 }
 
 #[tokio::test]
 async fn slow_startup_command_does_not_block_started() {
     let lifecycle = lifecycle("on startup sleep 30");
-    tokio::time::timeout(Duration::from_secs(2), lifecycle.run(Phase::Started))
-        .await
-        .expect("Started waited for the command")
-        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        lifecycle.run(Phase::InstanceStartup),
+    )
+    .await
+    .expect("InstanceStartup waited for the command")
+    .unwrap();
+    lifecycle.run(Phase::Shutdown).await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]

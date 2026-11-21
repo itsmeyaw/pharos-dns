@@ -208,7 +208,7 @@
 ## on
 
 - [on Plugin notes](../crates/pharos-plugins/src/on/README.md)
-- `on` accepts the events of coredns/caddy v1.1.4's `onevent` (`startup`, `shutdown`, `certrenew`). Commands run directly, never through a shell, and never block Query serving or Reload; a blocking `shutdown` command is killed after five seconds. `certrenew` never fires, as in CoreDNS.
+- `on` accepts the events of coredns/caddy v1.1.4's `onevent` (`startup`, `shutdown`, `certrenew`). Commands run directly, never through a shell, and never block Query serving or Reload; a blocking `shutdown` command is killed after five seconds, and a blocking `startup` command still running when its instance stops (Reload or exit) is killed; `&` commands are never stopped. `certrenew` never fires, as in CoreDNS.
 
 ## pprof
 

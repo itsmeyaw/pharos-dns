@@ -32,13 +32,13 @@ fn each_server_block_registers_its_own_hooks() {
     )
     .unwrap();
     let configured = configure::<Chain>(&blocks, directives()).unwrap();
-    // certrenew registers nothing: startup and shutdown (Restart, RestartFailed, Shutdown) only.
+    // certrenew registers nothing; startup registers InstanceStartup and Shutdown, shutdown registers Restart, RestartFailed and Shutdown.
     assert_eq!(
         format!("{:?}", configured[0].config.lifecycle),
-        "Lifecycle { hooks: 4 }"
+        "Lifecycle { hooks: 5 }"
     );
     assert_eq!(
         format!("{:?}", configured[1].config.lifecycle),
-        "Lifecycle { hooks: 1 }"
+        "Lifecycle { hooks: 2 }"
     );
 }
