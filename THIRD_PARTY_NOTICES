@@ -255,6 +255,14 @@ insights.
 - License: Apache-2.0
 - Copyright 2015 Light Code Labs, LLC
 - The signal and exit-code behavior in `crates/pharos` follows coredns/caddy v1.1.4's `sigtrap.go`, `sigtrap_posix.go`, and `caddy.go`.
+- The on Plugin and tests follow coredns/caddy v1.1.4's `onevent`.
+
+## flynn/go-shlex
+
+- Source: https://github.com/flynn/go-shlex
+- License: Apache-2.0
+- Copyright 2012 Google Inc.
+- The on Plugin's command splitter and its tests port `shlex.go` and `shlex_test.go` at v0.0.0-20150515145356-3f9db97f8568.
 
 ## Azure/go-autorest
 
