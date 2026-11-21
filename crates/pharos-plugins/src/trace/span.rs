@@ -40,10 +40,15 @@ pub(super) fn proto(protocol: Protocol) -> &'static str {
     }
 }
 
+// zipkin-go v0.4.3 model/span.go: timestamps and durations are rounded to the nearest microsecond, not truncated.
+fn round_micros(elapsed: Duration) -> u64 {
+    ((elapsed.as_nanos() + 500) / 1000) as u64
+}
+
 pub(super) fn unix_micros() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_micros() as u64)
+        .map_or(0, round_micros)
 }
 
 impl SpanRecord {
@@ -101,5 +106,20 @@ impl SpanRecord {
         (self.name_len != 0)
             .then(|| NameRef::parse(&self.name[..usize::from(self.name_len)], 0).ok())
             .flatten()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::round_micros;
+
+    // zipkin-go v0.4.3 model/span.go: .5 µs rounds up, anything below it down.
+    #[test]
+    fn micros_round_to_nearest() {
+        for (nanos, micros) in [(0, 0), (499, 0), (500, 1), (1_499, 1), (1_500, 2)] {
+            assert_eq!(round_micros(Duration::from_nanos(nanos)), micros, "{nanos}");
+        }
     }
 }
