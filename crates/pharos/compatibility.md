@@ -214,6 +214,10 @@
 
 - [rewrite Plugin notes](../crates/pharos-plugins/src/rewrite/README.md)
 
+## route53
+
+- [route53 Plugin notes](../crates/pharos-plugins/src/route53/README.md)
+
 ## siit
 
 - [siit Plugin notes](../crates/pharos-plugins/src/siit/README.md)
