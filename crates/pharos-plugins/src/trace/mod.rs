@@ -293,6 +293,7 @@ pub(crate) fn parse(
             let args = cursor.remaining_args();
             match property.as_str() {
                 "every" => {
+                    // CoreDNS v1.15.0 plugin/trace/setup.go traceParse `every`: one argument, parsed with strconv.ParseUint.
                     let [value] = args.as_slice() else {
                         return Err(cursor.arg_err());
                     };
@@ -304,12 +305,14 @@ pub(crate) fn parse(
                         .ok_or_else(|| cursor.error(format!("invalid syntax: '{value}'")))?;
                 }
                 "service" => {
+                    // CoreDNS v1.15.0 plugin/trace/setup.go traceParse `service`: exactly one argument names the service.
                     let [value] = args.as_slice() else {
                         return Err(cursor.arg_err());
                     };
                     config.service_name.clone_from(value);
                 }
                 "client_server" => {
+                    // CoreDNS v1.15.0 plugin/trace/setup.go traceParse `client_server`: no argument means true, else strconv.ParseBool.
                     config.client_server = match args.as_slice() {
                         [] => true,
                         [value] => parse_bool(value)
@@ -318,6 +321,7 @@ pub(crate) fn parse(
                     };
                 }
                 "datadog_analytics_rate" => {
+                    // CoreDNS v1.15.0 plugin/trace/setup.go traceParse `datadog_analytics_rate`: no argument means 0, else ParseFloat limited to 0..1.
                     config.datadog_analytics_rate = match args.as_slice() {
                         [] => 0.0,
                         [value] => value
@@ -333,6 +337,7 @@ pub(crate) fn parse(
                     }
                 }
                 "zipkin_max_backlog_size" | "zipkin_max_batch_size" => {
+                    // CoreDNS v1.15.0 plugin/trace/setup.go traceParse `zipkin_max_backlog_size` and `zipkin_max_batch_size`: one argument, strconv.Atoi.
                     let [value] = args.as_slice() else {
                         return Err(cursor.arg_err());
                     };
@@ -346,12 +351,14 @@ pub(crate) fn parse(
                     }
                 }
                 "zipkin_max_batch_interval" => {
+                    // CoreDNS v1.15.0 plugin/trace/setup.go traceParse `zipkin_max_batch_interval`: one argument, time.ParseDuration.
                     let [value] = args.as_slice() else {
                         return Err(cursor.arg_err());
                     };
                     config.zipkin_max_batch_interval = crate::health::parse_duration(value)
                         .ok_or_else(|| cursor.error(format!("invalid duration: '{value}'")))?;
                 }
+                // CoreDNS v1.15.0 plugin/trace/setup.go traceParse: any other property is an error.
                 _ => return Err(cursor.error(format!("unknown property '{property}'"))),
             }
         }
