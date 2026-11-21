@@ -1,5 +1,6 @@
 //! dnstap Directive: logs Queries and Responses as dnstap messages.
 
+pub mod framestream;
 pub mod msg;
 pub(crate) mod setup;
 
