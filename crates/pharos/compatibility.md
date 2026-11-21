@@ -178,6 +178,14 @@
 
 - [nsid Plugin notes](../crates/pharos-plugins/src/nsid/README.md)
 
+## pprof
+
+- [pprof Plugin notes](../crates/pharos-plugins/src/pprof/README.md)
+- Endpoints: `/debug/pprof/` (index), `profile`, `cmdline` and `symbol` are served; `/debug/pprof` redirects with 302. Go-only profiles (`allocs`, `block`, `goroutine`, `heap`, `mutex`, `threadcreate`) and `trace` return 404, because Rust has no equivalent runtime data.
+- `profile` is a 100 Hz CPU profile in uncompressed pprof protobuf (Go emits gzip); `seconds` must be 1 to 4 because of the 5 s write timeout, as in CoreDNS, and one profile runs at a time. `symbol` answers GET with `num_symbols: 0` and does not symbolise POSTed addresses.
+- `block [RATE]` is parsed like CoreDNS but ignored (no Rust block profiler); `mutex` is not a property in CoreDNS v1.15.0 and is rejected as unknown.
+- Operational HTTP endpoints allow GET and HEAD only; recognized other methods return 405 and unknown methods return 501. CoreDNS serves the pprof handlers for every method.
+
 ## prometheus
 
 - [prometheus Plugin notes](../crates/pharos-plugins/src/prometheus/README.md)
@@ -289,7 +297,7 @@
 - CoreDNS v1.15.0's `plugin.SplitHostPort` caps server-block key presentation at 255 bytes before DNS wire-length validation (`plugin/normalize.go`, `core/dnsserver/register.go`). Pharos preserves this under ADR 0003 (CoreDNS wins), so some RFC 1035 §2.3.4-valid escaped names with longer presentation remain rejected.
 - CoreDNS v1.15.0 normalizes server-block names with Go 1.26.0 `strings.ToLower` and rejects IPv6 CIDRs beginning with `:` or `0` followed by `:` (`plugin/normalize.go`). Pharos preserves those Corefile behaviors under ADR 0003 (CoreDNS wins), despite RFC 4343 §3 and RFC 4291 §2.3. Pharos writes non-ASCII UTF-8 octets in normalized key text as RFC 4343 `\DDD` escapes so the ASCII DNS presentation parser can consume them; wire labels remain the same octets.
 - CoreDNS v1.15.0's caddy v1.1.4 import parser rejects patterns with multiple `*` or `?` wildcards and all bracket expressions (`caddyfile/parse.go`); Pharos preserves those limits under ADR 0003 (CoreDNS wins).
-- Only `root`, `cancel`, `timeouts`, `debug`, `shed`, `acl`, `any`, `auto`, `autopath`, `bind`, `bufsize`, `cache`, `chaos`, `dns64`, `dnssec`, `errors`, `erratic`, `file`, `forward`, `geoip`, `header`, `health`, `hosts`, `https`, `https3`, `k8s_external`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `metadata`, `minimal`, `multisocket`, `nsid`, `prometheus`, `proxyproto`, `quic`, `ready`, `reload`, `rewrite`, `secondary`, `siit`, `sign`, `template`, `tls`, `trace`, `transfer`, `tsig`, `view` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
+- Only `root`, `cancel`, `timeouts`, `debug`, `shed`, `acl`, `any`, `auto`, `autopath`, `bind`, `bufsize`, `cache`, `chaos`, `dns64`, `dnssec`, `errors`, `erratic`, `file`, `forward`, `geoip`, `header`, `health`, `hosts`, `https`, `https3`, `k8s_external`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `metadata`, `minimal`, `multisocket`, `nsid`, `pprof`, `prometheus`, `proxyproto`, `quic`, `ready`, `reload`, `rewrite`, `secondary`, `siit`, `sign`, `template`, `tls`, `trace`, `transfer`, `tsig`, `view` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 - A first Zone record with an omitted owner is rejected: miekg/dns accepts it with an empty owner, which cannot be encoded as a valid DNS name without inventing one.
 - Zone records whose parsed data cannot be encoded on the wire are rejected. miekg/dns can accept such records during parsing, including invalid base64, duplicate SVCB keys and RDATA over 65,535 octets, but then fails to pack them.
