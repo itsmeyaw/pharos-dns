@@ -155,36 +155,37 @@ async fn sampled_query_exports_a_span_with_its_tags() {
     let mut response = Vec::with_capacity(512);
     query(&server, &mut response).await;
     until("the span", || collector.spans() == 1).await;
-    let requests = collector.requests.lock().unwrap();
-    let request = &requests[0];
-    // Zipkin v2 API: a JSON array POSTed to the configured path.
-    assert!(
-        request.head.starts_with("POST /api/v2/spans HTTP/1.1\r\n"),
-        "{}",
-        request.head
-    );
-    assert!(
-        request.head.contains("Content-Type: application/json"),
-        "{}",
-        request.head
-    );
-    assert!(request.head.contains("b3: 0"), "{}", request.head);
-    for expected in [
-        r#""kind":"SERVER""#,
-        r#""localEndpoint":{"serviceName":"pharos-test"}"#,
-        r#""coredns.io/name":"example.org.""#,
-        r#""coredns.io/type":"A""#,
-        r#""coredns.io/rcode":"NOERROR""#,
-        r#""coredns.io/proto":"udp""#,
-        r#""coredns.io/remote":"127.0.0.1""#,
-    ] {
+    {
+        let requests = collector.requests.lock().unwrap();
+        let request = &requests[0];
+        // Zipkin v2 API: a JSON array POSTed to the configured path.
         assert!(
-            request.body.contains(expected),
-            "{expected}: {}",
-            request.body
+            request.head.starts_with("POST /api/v2/spans HTTP/1.1\r\n"),
+            "{}",
+            request.head
         );
+        assert!(
+            request.head.contains("Content-Type: application/json"),
+            "{}",
+            request.head
+        );
+        assert!(request.head.contains("b3: 0"), "{}", request.head);
+        for expected in [
+            r#""kind":"SERVER""#,
+            r#""localEndpoint":{"serviceName":"pharos-test"}"#,
+            r#""coredns.io/name":"example.org.""#,
+            r#""coredns.io/type":"A""#,
+            r#""coredns.io/rcode":"NOERROR""#,
+            r#""coredns.io/proto":"udp""#,
+            r#""coredns.io/remote":"127.0.0.1""#,
+        ] {
+            assert!(
+                request.body.contains(expected),
+                "{expected}: {}",
+                request.body
+            );
+        }
     }
-    drop(requests);
     until("the exported counter", || {
         metric(&registry, "pharos_trace_exported_spans_total ") == 1
     })
