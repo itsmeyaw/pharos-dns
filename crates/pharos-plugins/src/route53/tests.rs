@@ -1,5 +1,8 @@
-use super::{Config, Secret, setup::parse};
+use super::{
+    Config, RecordSet, Secret, append_records, convert_page, maybe_unescape, setup::parse,
+};
 use pharos_corefile::{Cursor, Error, lex};
+use pharos_proto::{Name, Type, zone::ZoneRecord};
 use std::{path::PathBuf, time::Duration};
 
 fn parse_text(text: &str) -> Result<Vec<Config>, Error> {
@@ -215,4 +218,193 @@ fn every_route53_line_is_a_stanza() {
     assert_eq!(stanzas[0].refresh, Duration::from_secs(5));
     assert_eq!(stanzas[1].zones, [("b.".to_owned(), vec!["2".to_owned()])]);
     assert_eq!(stanzas[1].refresh, Duration::from_secs(60));
+}
+
+// CoreDNS v1.15.0 plugin/route53/route53_test.go TestMaybeUnescape.
+#[test]
+fn maybe_unescape_matches_coredns() {
+    for (escaped, expected) in [
+        ("", Ok("")),
+        ("example.com.", Ok("example.com.")),
+        (r"\052.example.com", Ok("*.example.com")),
+        (
+            r"weird\055ex\141mple\056com\056\056",
+            Ok("weird-example.com.."),
+        ),
+        (
+            r"e\052ample.com",
+            Err("`*' only supported as wildcard (leftmost label)"),
+        ),
+        (r"\000.example.com", Err(r"invalid character: \000")),
+        (r"example\0com", Err(r"invalid escape sequence: '\0co'")),
+        (r"example.com\0", Err(r"invalid escape sequence: '\0'")),
+    ] {
+        assert_eq!(
+            maybe_unescape(escaped),
+            expected.map(str::to_owned).map_err(str::to_owned),
+            "{escaped}"
+        );
+    }
+}
+
+// CoreDNS v1.15.0 plugin/route53/route53.go maybeUnescape: ParseInt(.., 8, 8) bounds and the character set.
+#[test]
+fn maybe_unescape_edge_cases() {
+    // 0o177 is the largest int8 and DEL is not allowed; 0o200 does not fit.
+    assert_eq!(
+        maybe_unescape(r"\177").unwrap_err(),
+        r"invalid character: \0177"
+    );
+    assert_eq!(
+        maybe_unescape(r"\200").unwrap_err(),
+        r"invalid escape sequence: '\200'"
+    );
+    // An underscore is not a character Route 53 would leave unescaped for us.
+    assert_eq!(
+        maybe_unescape(r"\137").unwrap_err(),
+        r"invalid character: \0137"
+    );
+    // ParseInt also accepts a sign: `+52` is `*`.
+    assert_eq!(maybe_unescape(r"\+52.a").unwrap(), "*.a");
+    assert_eq!(
+        maybe_unescape(r"\-12").unwrap_err(),
+        r"invalid character: \-012"
+    );
+    assert_eq!(
+        maybe_unescape(r"\089").unwrap_err(),
+        r"invalid escape sequence: '\089'"
+    );
+    // Escapes may not split a multi-byte character.
+    assert!(maybe_unescape("\\05é").is_err());
+    assert_eq!(maybe_unescape("é.example").unwrap(), "é.example");
+}
+
+fn set(name: &str, rtype: &str, values: &[&str]) -> RecordSet {
+    RecordSet {
+        name: name.to_owned(),
+        rtype: rtype.to_owned(),
+        ttl: 300,
+        values: values.iter().map(|value| (*value).to_owned()).collect(),
+    }
+}
+
+fn name(text: &str) -> Name {
+    text.parse().unwrap()
+}
+
+fn convert(set: &RecordSet) -> Result<Vec<ZoneRecord>, String> {
+    let mut records = Vec::new();
+    append_records(set, &mut records).map(|()| records)
+}
+
+// CoreDNS v1.15.0 plugin/route53/route53.go updateZoneFromRRS: "{name} {ttl} IN {type} {value}" parsed as one RR.
+#[test]
+fn a_record_set_becomes_one_record_per_value() {
+    let records = convert(&set("example.org.", "A", &["1.2.3.4", "5.6.7.8"])).unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].owner, name("example.org."));
+    assert_eq!(records[0].ttl, 300);
+    assert_eq!(records[0].rtype, Type::A);
+    assert_eq!(records[0].rdata, [1, 2, 3, 4]);
+    assert_eq!(records[1].rdata, [5, 6, 7, 8]);
+}
+
+#[test]
+fn relative_names_and_wildcards_are_unescaped_under_the_root() {
+    let records = convert(&set("www.example.org", "A", &["1.2.3.4"])).unwrap();
+    assert_eq!(records[0].owner, name("www.example.org."));
+    let records = convert(&set(r"\052.www.example.org", "CNAME", &["www.example.org"])).unwrap();
+    assert_eq!(records[0].owner, name("*.www.example.org."));
+    assert_eq!(records[0].rtype, Type::CNAME);
+}
+
+#[test]
+fn an_alias_set_yields_no_records() {
+    assert_eq!(convert(&set("example.org.", "A", &[])).unwrap(), []);
+}
+
+// CoreDNS v1.15.0 plugin/route53/route53_test.go: the fake hosted zone's record sets all convert except the unsupported type.
+#[test]
+fn coredns_fixture_record_sets_convert() {
+    for (rtype, name, value) in [
+        ("A", "example.org.", "1.2.3.4"),
+        ("A", "www.example.org", "1.2.3.4"),
+        ("CNAME", r"\052.www.example.org", "www.example.org"),
+        ("AAAA", "example.org.", "2001:db8:85a3::8a2e:370:7334"),
+        ("CNAME", "sample.example.org.", "example.org"),
+        ("PTR", "example.org.", "ptr.example.org."),
+        (
+            "SOA",
+            "org.",
+            "ns-1536.awsdns-00.co.uk. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400",
+        ),
+        ("NS", "com.", "ns-1536.awsdns-00.co.uk."),
+        ("TXT", "example.org.", "\"hello world\""),
+        ("MX", "example.org.", "10 mail.example.org."),
+    ] {
+        let records = convert(&set(name, rtype, &[value])).unwrap_or_else(|error| {
+            panic!("{rtype} {name} {value}: {error}");
+        });
+        assert_eq!(records.len(), 1, "{rtype} {name}");
+    }
+    let error = convert(&set("swag.", "YOLO", &["foobar"])).unwrap_err();
+    assert!(
+        error.starts_with("failed to parse resource record: "),
+        "{error}"
+    );
+}
+
+#[test]
+fn bad_escapes_and_values_are_reported_like_coredns() {
+    let error = convert(&set(r"e\052ample.com", "A", &["1.2.3.4"])).unwrap_err();
+    assert_eq!(
+        error,
+        r"failed to unescape `e\052ample.com' name: `*' only supported as wildcard (leftmost label)"
+    );
+    let error = convert(&set("example.org.", "TXT", &[r"\137"])).unwrap_err();
+    assert_eq!(
+        error,
+        r"failed to unescape `\137' value: invalid character: \0137"
+    );
+    // A value cannot smuggle in a second record.
+    let error = convert(&set(
+        "example.org.",
+        "A",
+        &["1.2.3.4\nexample.org. 300 IN A 5.6.7.8"],
+    ))
+    .unwrap_err();
+    assert!(error.contains("more than one resource record"), "{error}");
+}
+
+// CoreDNS v1.15.0 plugin/route53/route53.go updateZoneFromRRS: records before the failing one stay inserted.
+#[test]
+fn a_bad_value_keeps_the_records_before_it() {
+    let mut records = Vec::new();
+    let error = append_records(
+        &set("example.org.", "A", &["1.2.3.4", "nope", "5.6.7.8"]),
+        &mut records,
+    )
+    .unwrap_err();
+    assert!(
+        error.starts_with("failed to parse resource record: "),
+        "{error}"
+    );
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].rdata, [1, 2, 3, 4]);
+}
+
+// CoreDNS v1.15.0 plugin/route53/route53.go updateZones: a failing record set is logged and the next one still loads.
+#[test]
+fn convert_page_skips_failing_record_sets() {
+    let mut records = Vec::new();
+    convert_page(
+        &[
+            set("swag.", "YOLO", &["foobar"]),
+            set("alias.example.org.", "A", &[]),
+            set("example.org.", "A", &["1.2.3.4"]),
+        ],
+        &mut records,
+    );
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].owner, name("example.org."));
 }
