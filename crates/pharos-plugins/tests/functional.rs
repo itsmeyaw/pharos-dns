@@ -5,6 +5,10 @@
 #[path = "functional/dynupdate.rs"]
 mod dynupdate;
 
+#[cfg(feature = "plugin-on")]
+#[path = "functional/on_setup.rs"]
+mod on_setup;
+
 #[cfg(feature = "plugin-sign")]
 #[path = "functional/sign.rs"]
 mod sign;

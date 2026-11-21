@@ -22,6 +22,7 @@ fn config_only(name: &str) -> bool {
             | "reload"
             | "view"
             | "sign"
+            | "on"
     )
 }
 
@@ -93,6 +94,7 @@ fn main() {
             "cancel" => "cancel::Cancel",
             "timeouts" => "timeouts::Timeouts",
             "debug" => "()",
+            "on" => "()",
             "shed" => "shed::Shed",
             "any" => "any::Any",
             "chaos" => "chaos::Chaos",
@@ -208,6 +210,7 @@ fn main() {
             "erratic" => "erratic::setup::setup",
             "trace" => "trace::setup::setup",
             "etcd" => "etcd::setup::setup",
+            "on" => "on::setup::setup",
             "kubernetes" => "kubernetes::setup::setup",
             _ => "setup_unimplemented",
         };
