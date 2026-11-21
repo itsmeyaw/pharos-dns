@@ -268,6 +268,10 @@
 
 - [view Plugin notes](../crates/pharos-plugins/src/view/README.md)
 
+## trace
+
+- [trace Plugin notes](../crates/pharos-plugins/src/trace/README.md)
+
 ## whoami
 
 - [whoami Plugin notes](../crates/pharos-plugins/src/whoami/README.md)
