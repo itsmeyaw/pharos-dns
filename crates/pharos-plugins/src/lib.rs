@@ -126,6 +126,8 @@ pub mod zone;
 #[cfg(all(test, feature = "plugin-cache", feature = "plugin-hosts"))]
 mod self_lookup_test;
 
+#[cfg(feature = "plugin-dnstap")]
+pub mod dnstap;
 #[cfg(feature = "plugin-forward")]
 pub mod forward;
 #[cfg(feature = "plugin-geoip")]
