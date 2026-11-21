@@ -4,7 +4,7 @@ use aws_config::BehaviorVersion;
 use aws_config::profile::profile_file::{ProfileFileKind, ProfileFiles};
 use aws_sdk_route53::{
     config::{Builder, Credentials},
-    error::DisplayErrorContext,
+    error::ProvideErrorMetadata,
     types::RrType,
 };
 
@@ -56,6 +56,14 @@ pub(super) async fn connect(config: &Config) -> Result<Sdk, String> {
     )))
 }
 
+/// The service's code and message when it sent them; the SDK's own Display of a failure is long and nested.
+fn describe(error: &(impl ProvideErrorMetadata + std::fmt::Display)) -> String {
+    match (error.code(), error.message()) {
+        (Some(code), Some(message)) => format!("{code}: {message}"),
+        _ => error.to_string(),
+    }
+}
+
 impl Api for Sdk {
     async fn check_hosted_zone(&self, dns: &str, hosted_zone_id: &str) -> Result<(), String> {
         self.0
@@ -65,7 +73,7 @@ impl Api for Sdk {
             .send()
             .await
             .map(|_| ())
-            .map_err(|error| DisplayErrorContext(error).to_string())
+            .map_err(|error| describe(&error))
     }
 
     async fn list_record_sets(
@@ -85,10 +93,7 @@ impl Api for Sdk {
                 .start_record_type(RrType::from(start.rtype.as_str()))
                 .set_start_record_identifier(start.identifier.clone());
         }
-        let output = request
-            .send()
-            .await
-            .map_err(|error| DisplayErrorContext(error).to_string())?;
+        let output = request.send().await.map_err(|error| describe(&error))?;
         let sets = output
             .resource_record_sets()
             .iter()
