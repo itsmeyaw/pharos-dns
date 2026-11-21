@@ -113,6 +113,34 @@ impl Azure {
 
 impl Plugin for Azure {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
-        next.run(cx).await
+        let Some(question) = cx.query.questions().next() else {
+            return next.run(cx).await;
+        };
+        // RFC 1035 §3.1: expand the QNAME to uncompressed wire form on the stack.
+        let mut wire = [0u8; 255];
+        let mut len = 0;
+        for label in question.name.labels() {
+            wire[len] = label.len() as u8;
+            len += 1;
+            wire[len..len + label.len()].copy_from_slice(label);
+            len += label.len();
+        }
+        let name = &wire[..len + 1];
+        // CoreDNS v1.15.0 plugin/azure/azure.go ServeDNS: the longest matching configured zone name serves; none passes the Query on.
+        let Some(apex) = self
+            .names
+            .iter()
+            .filter(|apex| contains(name, apex))
+            .max_by_key(|apex| apex.as_wire().len())
+        else {
+            return next.run(cx).await;
+        };
+        let snapshot = self.select(apex, name).map(|hosted| hosted.current.load());
+        match snapshot.as_ref().and_then(|snapshot| snapshot.as_ref()) {
+            Some(zone) => zone.lookup(cx, next, &self.fallthrough).await,
+            // CoreDNS v1.15.0 plugin/azure/azure.go ServeDNS: a Zone without records has no answer, so Fallthrough applies, else SERVFAIL.
+            None if self.fallthrough.iter().any(|zone| contains(name, zone)) => next.run(cx).await,
+            None => Outcome::Unanswered(Rcode::SERVFAIL),
+        }
     }
 }
