@@ -562,6 +562,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("tls", include_str!("tls/README.md")),
     ("tsig", include_str!("tsig/README.md")),
     ("transfer", include_str!("transfer/README.md")),
+    ("trace", include_str!("trace/README.md")),
     ("view", include_str!("view/README.md")),
     ("whoami", include_str!("whoami/README.md")),
 ];
