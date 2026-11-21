@@ -281,6 +281,7 @@ fn main() {
     if enabled.contains(&"metadata") && enabled.contains(&"proxyproto") {
         code.push_str("\nif self.metadata.as_ref().is_some_and(|plugin| plugin.matches(cx)) { cx.metadata.publish_proxy_tlv(); }\n");
     }
+    // CoreDNS v1.15.0 plugin/metadata/metadata.go: Metadata providers run in Plugin Order before the rest of the chain.
     if enabled.contains(&"metadata") && enabled.contains(&"geoip") {
         code.push_str("\nif self.metadata.as_ref().is_some_and(|plugin| plugin.matches(cx)) && let Some(plugin) = &self.geoip { plugin.collect_metadata(cx); } ");
     }

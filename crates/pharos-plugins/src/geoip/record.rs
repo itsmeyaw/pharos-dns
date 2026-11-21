@@ -47,6 +47,7 @@ fn put(metadata: &mut Metadata<'_>, label: &'static str, value: Option<&str>) {
     metadata.insert_copied(label, value.unwrap_or_default());
 }
 
+// ADR 0005 / CODING_STANDARDS.md: fixed-capacity stack text keeps label formatting allocation-free per Query.
 fn put_display(metadata: &mut Metadata<'_>, label: &'static str, value: Option<impl fmt::Display>) {
     let mut text = Text::<40>::default();
     if let Some(value) = value
