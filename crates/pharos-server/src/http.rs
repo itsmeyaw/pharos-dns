@@ -62,9 +62,98 @@ struct Guard {
     basic_auth: Option<Arc<BasicAuth>>,
 }
 
-struct State<F> {
-    route: F,
+struct State<R> {
+    route: R,
     guard: Guard,
+}
+
+/// Maps one request to a response: `Plain` wraps the synchronous callbacks, `AsyncRoute` the asynchronous one.
+trait Route: Send + Sync + 'static {
+    fn call(
+        &self,
+        request: Request<Incoming>,
+        secure: bool,
+    ) -> impl Future<Output = Response<Full<Bytes>>> + Send;
+}
+
+struct Plain<F>(F);
+
+impl<F> Route for Plain<F>
+where
+    F: Fn(&str, &str) -> Option<(u16, &'static str, String)> + Send + Sync + 'static,
+{
+    async fn call(&self, request: Request<Incoming>, secure: bool) -> Response<Full<Bytes>> {
+        response_for_request(&self.0, request, secure)
+    }
+}
+
+/// A request handed to an asynchronous route.
+pub struct RouteRequest {
+    /// Method token as sent, for example `GET`; HEAD is delivered as `GET` and its body is dropped.
+    pub method: String,
+    pub path: String,
+    /// Raw query string without the leading `?`.
+    pub query: Option<String>,
+}
+
+/// A complete response from an asynchronous route.
+pub struct Reply {
+    pub status: u16,
+    pub content_type: &'static str,
+    /// Extra header fields as lowercase `(name, value)` pairs; invalid pairs are dropped.
+    pub headers: Vec<(&'static str, &'static str)>,
+    pub body: Bytes,
+}
+
+struct AsyncRoute<F>(F);
+
+impl<F, Fut> Route for AsyncRoute<F>
+where
+    F: Fn(RouteRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Reply> + Send + 'static,
+{
+    async fn call(&self, request: Request<Incoming>, _secure: bool) -> Response<Full<Bytes>> {
+        let method = request.method().as_str();
+        if !recognized_method(method) {
+            // RFC 9110 §9.1: Unsupported method tokens receive 501.
+            return text_response(StatusCode::NOT_IMPLEMENTED, "Not Implemented\n");
+        }
+        // RFC 9110 §9.3.2: HEAD gets the selected GET representation; hyper drops the body.
+        let method = if method == "HEAD" { "GET" } else { method }.to_owned();
+        let reply = (self.0)(RouteRequest {
+            method,
+            path: request.uri().path().to_owned(),
+            query: request.uri().query().map(str::to_owned),
+        })
+        .await;
+        let Ok(status) = StatusCode::from_u16(reply.status) else {
+            return text_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error\n");
+        };
+        let mut response = Response::new(Full::new(reply.body));
+        *response.status_mut() = status;
+        let headers = response.headers_mut();
+        // RFC 9110 §8.3: Content-Type describes the representation.
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static(reply.content_type));
+        for (name, value) in reply.headers {
+            if let (Ok(name), Ok(value)) = (
+                HeaderName::from_bytes(name.as_bytes()),
+                HeaderValue::from_str(value),
+            ) {
+                headers.insert(name, value);
+            }
+        }
+        response
+    }
+}
+
+fn text_response(status: StatusCode, body: &'static str) -> Response<Full<Bytes>> {
+    let mut response = Response::new(Full::new(Bytes::from_static(body.as_bytes())));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    response
 }
 
 /// HTTP listener whose callback maps GET paths to `(content_type, body)`.
@@ -198,6 +287,20 @@ impl Listener {
     where
         F: Fn(&str, &str) -> Option<(u16, &'static str, String)> + Send + Sync + 'static,
     {
+        Self::bind_route(address, Plain(route), security).await
+    }
+
+    /// Bind an endpoint whose route is asynchronous and returns binary bodies, headers and any status.
+    /// The route receives every recognized method and chooses 404 or 405 itself; it runs on a Tokio worker.
+    pub async fn bind_async<F, Fut>(address: &str, route: F) -> io::Result<Self>
+    where
+        F: Fn(RouteRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Reply> + Send + 'static,
+    {
+        Self::bind_route(address, AsyncRoute(route), Security::default()).await
+    }
+
+    async fn bind_route<R: Route>(address: &str, route: R, security: Security) -> io::Result<Self> {
         let guard = Guard {
             // RFC 7301 §3.1: the server selects h2 or http/1.1 from the client's offer.
             acceptor: security.tls.as_ref().map(|tls| {
@@ -340,18 +443,15 @@ fn ipv6_unavailable(error: &io::Error) -> bool {
         || error.raw_os_error() == Some(libc::EAFNOSUPPORT)
 }
 
-fn service<F>(
-    state: &Arc<State<F>>,
+fn service<R: Route>(
+    state: &Arc<State<R>>,
 ) -> impl Service<
     Request<Incoming>,
     Response = Response<Full<Bytes>>,
     Error = Infallible,
     Future: Send + 'static,
 > + Send
-+ 'static
-where
-    F: Fn(&str, &str) -> Option<(u16, &'static str, String)> + Send + Sync + 'static,
-{
++ 'static {
     let state = Arc::clone(state);
     service_fn(move |request: Request<Incoming>| {
         let state = Arc::clone(&state);
@@ -359,14 +459,13 @@ where
     })
 }
 
-async fn serve_http1<S, F>(
+async fn serve_http1<S, R: Route>(
     stream: S,
-    state: &Arc<State<F>>,
+    state: &Arc<State<R>>,
     stop: &mut watch::Receiver<bool>,
     deadline: Pin<&mut Sleep>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    F: Fn(&str, &str) -> Option<(u16, &'static str, String)> + Send + Sync + 'static,
 {
     // RFC 9110 §5.6.7: Hyper emits dates in IMF-fixdate format.
     // RFC 9110 §17.5: Bound combined request-target and field buffering.
@@ -383,14 +482,13 @@ async fn serve_http1<S, F>(
     .await;
 }
 
-async fn serve_http2<S, F>(
+async fn serve_http2<S, R: Route>(
     stream: S,
-    state: &Arc<State<F>>,
+    state: &Arc<State<R>>,
     stop: &mut watch::Receiver<bool>,
     deadline: Pin<&mut Sleep>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    F: Fn(&str, &str) -> Option<(u16, &'static str, String)> + Send + Sync + 'static,
 {
     let connection = http2::Builder::new(TokioExecutor::new())
         .serve_connection(TokioIo::new(stream), service(state));
@@ -421,10 +519,7 @@ async fn finish<C: Future<Output = hyper::Result<()>>>(
     }
 }
 
-async fn respond<F>(state: &State<F>, request: Request<Incoming>) -> Response<Full<Bytes>>
-where
-    F: Fn(&str, &str) -> Option<(u16, &'static str, String)> + Send + Sync + 'static,
-{
+async fn respond<R: Route>(state: &State<R>, request: Request<Incoming>) -> Response<Full<Bytes>> {
     let guard = &state.guard;
     let permitted = match &guard.basic_auth {
         // RFC 7617 §2: credentials travel in the Authorization request header field.
@@ -432,7 +527,7 @@ where
         None => true,
     };
     let mut response = if permitted {
-        response_for_request(&state.route, request, guard.acceptor.is_some())
+        state.route.call(request, guard.acceptor.is_some()).await
     } else {
         unauthorized()
     };

@@ -1,4 +1,4 @@
-use super::{Listener, MAX_HTTP1_BUFFER_SIZE, health_request};
+use super::{Listener, MAX_HTTP1_BUFFER_SIZE, Reply, health_request};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -472,4 +472,88 @@ async fn shutdown_drains_response_in_progress() {
     shutdown.await.unwrap().unwrap();
     let header_end = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
     assert_eq!(response.len() - header_end, length);
+}
+
+#[tokio::test]
+async fn async_route_serves_awaited_binary_body_headers_and_query() {
+    let listener = Listener::bind_async("127.0.0.1:0", |request| async move {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        Reply {
+            status: if request.method == "GET" { 200 } else { 405 },
+            content_type: "application/octet-stream",
+            headers: vec![("x-extra", "yes")],
+            body: format!("{}?{}", request.path, request.query.unwrap_or_default())
+                .into_bytes()
+                .into(),
+        }
+    })
+    .await
+    .unwrap();
+    let address = listener.local_addr();
+    let response = request(
+        address,
+        "GET /p?seconds=2 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    assert!(
+        response.contains("\r\ncontent-type: application/octet-stream\r\n"),
+        "{response}"
+    );
+    assert!(response.contains("\r\nx-extra: yes\r\n"), "{response}");
+    assert!(response.ends_with("\r\n\r\n/p?seconds=2"), "{response}");
+    // RFC 9110 §9.3.2: HEAD reaches the route as GET and carries no content.
+    let response = request(
+        address,
+        "HEAD /p HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    assert!(response.ends_with("\r\n\r\n"), "{response}");
+    // RFC 9110 §9.1: Recognized methods reach the route; unknown tokens receive 501.
+    let response = request(
+        address,
+        "POST /p HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 405"), "{response}");
+    let response = request(
+        address,
+        "FROB /p HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 501"), "{response}");
+    listener.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn async_route_in_flight_does_not_block_other_requests_and_drains_on_shutdown() {
+    let listener = Listener::bind_async("127.0.0.1:0", |request| async move {
+        if request.path == "/slow" {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        Reply {
+            status: 200,
+            content_type: "text/plain",
+            headers: Vec::new(),
+            body: request.path.into_bytes().into(),
+        }
+    })
+    .await
+    .unwrap();
+    let address = listener.local_addr();
+    let slow = tokio::spawn(request(
+        address,
+        "GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    ));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let fast = request(
+        address,
+        "GET /fast HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert!(fast.ends_with("\r\n\r\n/fast"), "{fast}");
+    assert!(!slow.is_finished());
+    listener.shutdown().await.unwrap();
+    assert!(slow.await.unwrap().ends_with("\r\n\r\n/slow"));
 }
