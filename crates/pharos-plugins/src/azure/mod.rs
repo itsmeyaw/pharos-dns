@@ -174,8 +174,25 @@ impl Azure {
 
 impl Plugin for Azure {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
+        // One lookup await and one pass-on await keep the future inside the server_future_size budget.
+        match self.pick(cx) {
+            Pick::Zone(zone) => zone.lookup(cx, next, &self.fallthrough).await,
+            Pick::Pass => next.run(cx).await,
+            Pick::Servfail => Outcome::Unanswered(Rcode::SERVFAIL),
+        }
+    }
+}
+
+enum Pick {
+    Zone(Arc<Zone>),
+    Pass,
+    Servfail,
+}
+
+impl Azure {
+    fn pick(&self, cx: &Context<'_, '_>) -> Pick {
         let Some(question) = cx.query.questions().next() else {
-            return next.run(cx).await;
+            return Pick::Pass;
         };
         // RFC 1035 §3.1: expand the QNAME to uncompressed wire form on the stack.
         let mut wire = [0u8; 255];
@@ -194,14 +211,16 @@ impl Plugin for Azure {
             .filter(|apex| contains(name, apex))
             .max_by_key(|apex| apex.as_wire().len())
         else {
-            return next.run(cx).await;
+            return Pick::Pass;
         };
-        let snapshot = self.select(apex, name).map(|hosted| hosted.current.load());
-        match snapshot.as_ref().and_then(|snapshot| snapshot.as_ref()) {
-            Some(zone) => zone.lookup(cx, next, &self.fallthrough).await,
+        match self
+            .select(apex, name)
+            .and_then(|hosted| hosted.current.load_full())
+        {
+            Some(zone) => Pick::Zone(zone),
             // CoreDNS v1.15.0 plugin/azure/azure.go ServeDNS: a Zone without records has no answer, so Fallthrough applies, else SERVFAIL.
-            None if self.fallthrough.iter().any(|zone| contains(name, zone)) => next.run(cx).await,
-            None => Outcome::Unanswered(Rcode::SERVFAIL),
+            None if self.fallthrough.iter().any(|zone| contains(name, zone)) => Pick::Pass,
+            None => Pick::Servfail,
         }
     }
 }
