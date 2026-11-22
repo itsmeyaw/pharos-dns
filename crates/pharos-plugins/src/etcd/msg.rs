@@ -252,15 +252,24 @@ fn unsigned(target: &mut u32, field: &str, value: Value) -> Result<(), String> {
 /// length disagree on the group, nothing is filtered. Services without a group always stay.
 #[must_use]
 pub fn group(mut services: Vec<Service>) -> Vec<Service> {
-    let Some(first) = services.first() else {
+    let Some(chosen) = chosen_group(services.iter()).map(str::to_owned) else {
         return services;
     };
+    services.retain(|service| service.group.is_empty() || service.group == chosen);
+    services
+}
+
+/// The group `services` are cut to, or `None` when [`group`] keeps them all.
+pub(super) fn chosen_group<'a>(
+    services: impl Iterator<Item = &'a Service> + Clone,
+) -> Option<&'a str> {
+    let first = services.clone().next()?;
     // Go: the shortest key with a group attribute sets the group for this set.
     let mut chosen = first.group.as_str();
     let mut slashes = count_slashes(&first.key);
     // Go Group fills `length[i]` only up to the `break`; later entries keep 0.
-    let mut measured = services.len();
-    for (index, service) in services.iter().enumerate() {
+    let mut measured = usize::MAX;
+    for (index, service) in services.clone().enumerate() {
         let count = count_slashes(&service.key);
         if count < slashes {
             if service.group.is_empty() {
@@ -272,24 +281,18 @@ pub fn group(mut services: Vec<Service>) -> Vec<Service> {
         }
     }
     if chosen.is_empty() {
-        return services;
+        return None;
     }
-    let length = |index: usize, service: &Service| {
-        if index < measured {
+    // Go: two grouped services on the shortest level that disagree leave the set as it is.
+    let disagree = services.enumerate().any(|(index, service)| {
+        let length = if index < measured {
             count_slashes(&service.key)
         } else {
             0
-        }
-    };
-    // Go: two grouped services on the shortest level that disagree leave the set as it is.
-    if services.iter().enumerate().any(|(index, service)| {
-        !service.group.is_empty() && length(index, service) == slashes && service.group != chosen
-    }) {
-        return services;
-    }
-    let chosen = chosen.to_owned();
-    services.retain(|service| service.group.is_empty() || service.group == chosen);
-    services
+        };
+        !service.group.is_empty() && length == slashes && service.group != chosen
+    });
+    (!disagree).then_some(chosen)
 }
 
 fn count_slashes(key: &str) -> usize {
@@ -349,7 +352,7 @@ fn join<'a>(prefix: &str, labels: impl Iterator<Item = &'a str>) -> String {
 /// The labels of `name` from the root down: Go `dns.SplitDomainName` reversed.
 ///
 /// A final `.` ends the name, and a `.` preceded by an odd number of backslashes is part of a label.
-fn labels_reversed(name: &str) -> impl Iterator<Item = &str> {
+pub(super) fn labels_reversed(name: &str) -> impl Iterator<Item = &str> {
     let bytes = name.as_bytes();
     let fqdn = is_fqdn(name);
     let mut end = if fqdn { bytes.len() - 1 } else { bytes.len() };
@@ -408,7 +411,7 @@ pub fn domain(key: &str) -> String {
 }
 
 /// miekg/dns IsFqdn: ends in a `.` that is not escaped.
-fn is_fqdn(name: &str) -> bool {
+pub(super) fn is_fqdn(name: &str) -> bool {
     let bytes = name.as_bytes();
     bytes
         .len()
