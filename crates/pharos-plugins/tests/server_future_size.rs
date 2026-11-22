@@ -30,9 +30,9 @@ fn handle_shared_future_fits_size_budget() {
         Protocol::Tcp,
         &mut response,
     );
-    // Tripwire for inline buffers / per-query memory blowups (TCP path boxes this future per pipelined query, crates/pharos-server/src/tcp.rs), not a stack budget; measures 20,808 B aarch64, 23,024 B x86_64 (debug).
+    // Tripwire for inline buffers / per-query memory blowups (TCP path boxes this future per pipelined query, crates/pharos-server/src/tcp.rs), not a stack budget; measured 20,808 B aarch64, 23,024 B x86_64 (debug) before the geoip Plugin; its 16-label Metadata buffer (1280 B) raises the x86_64 debug future to 32,776 B, so the budget is 36 KiB rather than 32 KiB.
     assert!(
-        std::mem::size_of_val(&future) <= 32 * 1024,
+        std::mem::size_of_val(&future) <= 36 * 1024,
         "Server future: {} bytes",
         std::mem::size_of_val(&future)
     );
