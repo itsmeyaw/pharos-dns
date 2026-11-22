@@ -98,7 +98,7 @@
 
 - [etcd Plugin notes](../crates/pharos-plugins/src/etcd/README.md)
 - Pharos reads etcd through a bounded view that a watch on the key prefix keeps current; CoreDNS reads etcd on every Query and never watches. A write is visible once its watch event arrives (typically milliseconds), a lease TTL in an answer can be up to five seconds stale, and while the watch is down every Query reads etcd as CoreDNS does. Only the etcd v3 gRPC API is used, never the JSON gateway.
-- A failed endpoint is tried last for one second, and the endpoints share the five second call time (CoreDNS `etcdTimeout`); an etcd that cannot be read is SERVFAIL.
+- A failed endpoint is tried last for one second, and the endpoints share the five second call time (CoreDNS `etcdTimeout`), which also covers the lease lookups of one read; an etcd that cannot be read is SERVFAIL.
 - The `etcd` Directive is allowed once per Server Block, where CoreDNS accepts several. `unix:` and other non-HTTP etcd endpoints are rejected at setup. A missing endpoint port is 443, as in grpc-go.
 - JSON syntax error messages and the handling of invalid UTF-8 in a Service value differ from Go's `encoding/json`; JSON nesting deeper than 128 levels is an error.
 - A service whose `host` is not a valid domain name is skipped where CoreDNS fails to pack the Response; loop and duplicate checks compare names ignoring case; a Response that does not fit drops the records that do not fit and sets TC where CoreDNS lets the Server truncate it; the lookup of a target outside the zones fails where Self Lookup is unavailable or nested ten deep.

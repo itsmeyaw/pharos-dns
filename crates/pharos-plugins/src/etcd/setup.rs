@@ -165,6 +165,9 @@ fn tls_config(args: &[String], root: Option<&Path>) -> Result<Arc<ClientConfig>,
 /// etcd clientv3 internal/endpoint/endpoint.go translateEndpoint: `http://HOST[:PORT]`,
 /// `https://HOST[:PORT]` or a bare `HOST[:PORT]`; the port defaults to 443 as in grpc-go.
 fn endpoint(text: &str, tls_configured: bool) -> Result<Endpoint, String> {
+    // etcd clientv3 endpoint.go translateEndpoint: url.Parse reads userinfo and clientv3 drops it, so it stays out of the text and every message.
+    let text = without_userinfo(text);
+    let text = text.as_str();
     // shortcut: unix sockets and other schemes are rejected at setup, where etcd clientv3 fails at dial; accept them when a deployment needs one.
     let unsupported = || format!("unsupported etcd endpoint '{text}'");
     if text.starts_with("unix:") || text.starts_with("unixs:") {
@@ -178,11 +181,7 @@ fn endpoint(text: &str, tls_configured: bool) -> Result<Endpoint, String> {
         // etcd clientv3 endpoint.go schemeToCredsRequirement: without a scheme the `tls` option decides.
         None => (tls_configured, text),
     };
-    // Go net/url Parse: the host ends at the first `/`, `?` or `#`, and userinfo before `@` is not part of it.
     let authority = authority.split(['/', '?', '#']).next().unwrap_or_default();
-    let authority = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host)| host);
     let invalid = || format!("invalid etcd endpoint '{text}'");
     let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
         let (host, after) = bracketed.split_once(']').ok_or_else(invalid)?;
@@ -208,6 +207,19 @@ fn endpoint(text: &str, tls_configured: bool) -> Result<Endpoint, String> {
         port,
         tls,
     })
+}
+
+/// `text` without the userinfo before the last `@` of its authority.
+fn without_userinfo(text: &str) -> String {
+    // Go net/url Parse: the authority ends at the first `/`, `?` or `#`.
+    let start = text.find("://").map_or(0, |scheme| scheme + 3);
+    let end = text[start..]
+        .find(['/', '?', '#'])
+        .map_or(text.len(), |at| start + at);
+    match text[start..end].rfind('@') {
+        Some(at) => format!("{}{}", &text[..start], &text[start + at + 1..]),
+        None => text.to_owned(),
+    }
 }
 
 #[cfg(test)]
