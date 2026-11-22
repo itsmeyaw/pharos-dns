@@ -201,6 +201,32 @@ async fn unix_listener_starts_and_removes_its_socket() {
     assert!(!path.exists());
 }
 
+// listener.go close: stopping never leaves the socket file or the gauge behind, even when clients never answer STOP.
+#[tokio::test]
+async fn stop_with_clients_that_never_answer_stop_still_cleans_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dnstap.sock");
+    let (tap, registry, _) = tap(listening(Endpoint::Unix(
+        path.to_string_lossy().into_owned(),
+    )));
+    tap.start().await;
+    // Closed one after another these would outlast the stop limit of three timeouts.
+    let mut collectors = Vec::new();
+    for _ in 0..4 {
+        collectors.push(
+            Collector::accept(UnixStream::connect(&path).await.unwrap())
+                .await
+                .unwrap(),
+        );
+    }
+    eventually(|| metric(&registry, "pharos_dnstap_connected") == 4).await;
+    let started = tokio::time::Instant::now();
+    tap.stop().await;
+    assert!(started.elapsed() < tap.0.timing.timeout * 2);
+    assert!(!path.exists());
+    assert_eq!(metric(&registry, "pharos_dnstap_connected"), 0);
+}
+
 // setup.go OnStartup: a listener that cannot start is logged, not fatal, and stopping afterwards is harmless.
 #[tokio::test]
 async fn bind_failure_only_logs() {

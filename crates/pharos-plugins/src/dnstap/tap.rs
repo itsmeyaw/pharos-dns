@@ -17,7 +17,7 @@ use pharos_server::{
 use tokio::{sync::watch, task::JoinHandle};
 
 use super::{
-    Config, Role,
+    Config, Endpoint, Role,
     framestream::TCP_TIMEOUT,
     io, listener,
     msg::{Header, Message},
@@ -263,15 +263,25 @@ impl Tap {
     /// Asks the task to finish what is queued and close the sinks, and waits a bounded time for it.
     // CoreDNS v1.15.0 plugin/dnstap/setup.go OnRestart and OnFinalShutdown: close the connection or listener.
     pub(crate) async fn stop(&self) {
-        let Some(Running { stop, task }) = self.0.running.lock().unwrap().take() else {
+        let Some(Running { stop, mut task }) = self.0.running.lock().unwrap().take() else {
             return;
         };
+        // Go's UnixListener.Close unlinks the socket file; Tokio's does not. Unlinking first lets a reload rebind
+        // at once, and no stop path, aborted or not, can leave the file behind.
+        if let (Role::Listen, Endpoint::Unix(path)) = (self.0.config.role, &self.0.config.endpoint)
+        {
+            let _ = std::fs::remove_file(path);
+        }
         let _ = stop.send(true);
         // A close is STOP, then FINISH, each bounded by the timeout; allow for both and the final flush.
         let limit = self.0.timing.timeout * 3;
-        let abort = task.abort_handle();
-        if tokio::time::timeout(limit, task).await.is_err() {
-            abort.abort();
+        if tokio::time::timeout(limit, &mut task).await.is_err() {
+            task.abort();
+            let _ = task.await;
+        }
+        // An aborted task cannot report its sinks as gone.
+        for _ in 0..self.0.sinks.swap(0, Ordering::Relaxed) {
+            self.metric(DnstapMetrics::disconnected);
         }
     }
 }

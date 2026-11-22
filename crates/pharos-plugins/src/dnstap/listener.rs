@@ -35,7 +35,7 @@ const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
 const MAX_HANDSHAKES: usize = 64;
 
 pub(super) enum Bound {
-    Unix(UnixListener, String),
+    Unix(UnixListener),
     Tcp(TcpListener),
     Tls(TcpListener, TlsAcceptor),
 }
@@ -49,7 +49,7 @@ enum Incoming {
 // CoreDNS v1.15.0 plugin/dnstap/listener.go listen.
 pub(super) async fn bind(config: &Config) -> io::Result<Option<Bound>> {
     match &config.endpoint {
-        Endpoint::Unix(path) => Ok(Some(Bound::Unix(UnixListener::bind(path)?, path.clone()))),
+        Endpoint::Unix(path) => Ok(Some(Bound::Unix(UnixListener::bind(path)?))),
         Endpoint::Tcp(address) => Ok(Some(Bound::Tcp(listen(address).await?))),
         Endpoint::Tls(address) => {
             let Some(files) = &config.tls else {
@@ -92,7 +92,7 @@ async fn listen(address: &str) -> io::Result<TcpListener> {
 impl Bound {
     async fn accept(&self) -> io::Result<Incoming> {
         Ok(match self {
-            Self::Unix(listener, _) => Incoming::Stream(Box::new(listener.accept().await?.0)),
+            Self::Unix(listener) => Incoming::Stream(Box::new(listener.accept().await?.0)),
             Self::Tcp(listener) => Incoming::Stream(Box::new(listener.accept().await?.0)),
             Self::Tls(listener, acceptor) => {
                 Incoming::Tls(listener.accept().await?.0, acceptor.clone())
@@ -174,14 +174,16 @@ pub(super) async fn run(tap: Tap, bound: Option<Bound>, mut stopped: watch::Rece
     }
     tap.report_drops();
     // CoreDNS v1.15.0 plugin/dnstap/listener.go close: flush and close each client's encoder.
+    // Concurrent, so one client that never answers STOP does not hold up the rest.
+    let mut closing = JoinSet::new();
     for link in clients {
-        let _ = link.close().await;
-        tap.sink_disconnected();
+        let tap = tap.clone();
+        closing.spawn(async move {
+            let _ = link.close().await;
+            tap.sink_disconnected();
+        });
     }
-    if let Bound::Unix(_, path) = &bound {
-        // Go's UnixListener.Close unlinks the socket file; Tokio's does not.
-        let _ = std::fs::remove_file(path);
-    }
+    while closing.join_next().await.is_some() {}
 }
 
 // CoreDNS v1.15.0 plugin/dnstap/listener.go Dnstap: write and flush to every client; a failure closes that client only.
