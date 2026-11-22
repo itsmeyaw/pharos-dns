@@ -27,7 +27,16 @@
 
 ## Allocations
 
-A Query answered from the view allocates in Pharos: it builds the owner `Name`, the lookup key strings and the list of answer records for each Query, and the Response is written from them. `tests/allocations/etcd_allocations.rs` pins what it measures on the warm path with the stub in the same process (the stub is idle on a hit): 17 allocations and 5 reallocations per Query for A and AAAA, 27 and 6 for SRV with its Additional address. The path is not allocation-free as the `grpc` Plugin's is. Serving straight from the parsed entry, without building the records first, is the way to remove them.
+A Query answered from the view allocates nothing in Pharos for A, AAAA, TXT, CNAME, PTR, MX and SRV (with its Additional addresses), for NODATA and NXDOMAIN, and for SOA. The lookup key and path are built in pooled strings, names are built on the stack, the cached services are read in place and the records are written straight into the Response (`direct.rs`); the hyper and h2 allocations of a read that misses are theirs. `tests/allocations/etcd_allocations.rs` pins the measure exactly, with the stub in the same process (the stub is idle on a hit): 0 allocations and 0 reallocations per Query for every one of those.
+
+These cases take the allocating path (`backend.rs`), which builds the owner `Name`, the lookup key and the lists of records, and give the same answers:
+
+- A host that is a name in an A, AAAA or TXT lookup (and in SRV or MX for the services that count), because the CNAME chain is chased and the chased answer comes before the CNAME is known to be kept. An in-zone chain is pinned at 15 allocations and 3 reallocations per Query for one CNAME to an address.
+- A name with a wildcard label (`*` or `any`) allocates its key path once.
+- More than 64 services in an A, AAAA, TXT or PTR lookup, or more than 16 in SRV or MX, because the fast path drops duplicates by comparing pairs; the allocating path hashes them.
+- A service that has a `group` allocates the name of the group once.
+- NS at the zone apex.
+- A Query that waits for etcd (a miss, or the view not being established) allocates in the client and may allocate one string: a pooled string returns to the pool of the thread that drops it, so a Query that moves between threads while it waits can leave its thread's pool short.
 
 ## Deferred
 

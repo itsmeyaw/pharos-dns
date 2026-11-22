@@ -104,7 +104,7 @@
 - A service whose `host` is not a valid domain name is skipped where CoreDNS fails to pack the Response; loop and duplicate checks compare names ignoring case; a Response that does not fit drops the records that do not fit and sets TC where CoreDNS lets the Server truncate it; the lookup of a target outside the zones fails where Self Lookup is unavailable or nested ten deep.
 - `Domain` of a key too short to hold a name is the root where CoreDNS panics.
 - Differential scenarios are skipped: they need a real etcd server.
-- The warm path allocates in Pharos (about 17 allocations per Query for A and AAAA, 27 for SRV); see the Plugin notes.
+- The warm path allocates nothing in Pharos for A, AAAA, TXT, CNAME, PTR, MX, SRV, SOA, NODATA and NXDOMAIN; a host that is a name (CNAME chain), a wildcard name, a large set of services (over 64, or over 16 for SRV and MX) or a `group` takes an allocating path with the same answers; see the Plugin notes.
 
 ## file
 
