@@ -18,7 +18,7 @@
 
 ## Deferred
 
-- `external_account` credential sources `aws`, `executable` and `certificate`.
+- `external_account` credential sources `aws`, `executable` and `certificate` (#195).
 - GCE detection before the metadata server is used: a host with no credentials fails at the first token fetch (Startup), not at discovery.
 - DRY follow-up: `http.rs` duplicates the small HTTP/1.1 client of the `tls` ACME code (and of the other cloud Plugins); fold them into one shared client once all have landed.
 
