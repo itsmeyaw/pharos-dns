@@ -358,13 +358,16 @@ impl Inner {
             outcome: Err(error),
             bytes: path.len(),
         };
-        // CoreDNS v1.15.0 plugin/etcd/etcd.go `get`: one `etcdTimeout` covers the reads of a path.
-        let reply = match timeout(self.client.timeouts().call, self.read(path, recursive)).await {
-            Ok(Ok(reply)) => reply,
-            Ok(Err(error)) => return failed(error),
-            Err(_) => return failed(Error::Client(client::Error::Timeout)),
+        // CoreDNS v1.15.0 plugin/etcd/etcd.go `get`: one `etcdTimeout` covers the reads of a path, and here the lease lookups too.
+        let fill = async {
+            let reply = self.read(path, recursive).await?;
+            Ok(self.records(reply).await)
         };
-        self.records(reply).await
+        match timeout(self.client.timeouts().call, fill).await {
+            Ok(Ok(fetched)) => fetched,
+            Ok(Err(error)) => failed(error),
+            Err(_) => failed(Error::Client(client::Error::Timeout)),
+        }
     }
 
     async fn read(&self, path: &str, recursive: bool) -> Result<RangeResponse, Error> {

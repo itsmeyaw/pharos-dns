@@ -664,6 +664,31 @@ async fn a_hung_etcd_is_servfail_within_the_call_time() {
     rig.shutdown().await;
 }
 
+// CoreDNS v1.15.0 plugin/etcd/etcd.go `etcdTimeout`: lease lookups share the five seconds of the read, not five each.
+#[tokio::test]
+async fn stalled_lease_lookups_are_servfail_within_the_call_time() {
+    let stub = EtcdStub::start().await;
+    for id in 1..=3 {
+        stub.set_lease(id, 100);
+        stub.put_lease(
+            &format!("/skydns/test/skydns/a/x{id}"),
+            r#"{"host":"10.0.0.1"}"#,
+            id,
+        );
+    }
+    stub.delay_lease(Duration::from_secs(3));
+    let rig = Rig::zone(&stub.endpoint(false), "").await;
+    let started = Instant::now();
+    let reply = rig.udp("a.skydns.test.", Type::A).await;
+    assert_eq!(reply.rcode, Rcode::SERVFAIL, "{reply:?}");
+    let elapsed = started.elapsed();
+    assert!(
+        (Duration::from_secs(4)..Duration::from_secs(7)).contains(&elapsed),
+        "{elapsed:?}"
+    );
+    rig.shutdown().await;
+}
+
 /// Ask until a Query is answered from the view, that is, without a `Range` call.
 async fn warm(rig: &Rig, stub: &EtcdStub, name: &str) {
     let deadline = Instant::now() + Duration::from_secs(5);

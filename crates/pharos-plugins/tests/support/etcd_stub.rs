@@ -94,6 +94,7 @@ struct State {
     connections: Mutex<Vec<AbortHandle>>,
     watch_down: AtomicBool,
     range_delay: Mutex<Duration>,
+    lease_delay: Mutex<Duration>,
     accepted: AtomicUsize,
     tokens_issued: AtomicU64,
     streams: AtomicU64,
@@ -156,6 +157,7 @@ impl EtcdStub {
             connections: Mutex::default(),
             watch_down: AtomicBool::new(false),
             range_delay: Mutex::new(Duration::ZERO),
+            lease_delay: Mutex::new(Duration::ZERO),
             accepted: AtomicUsize::new(0),
             tokens_issued: AtomicU64::new(0),
             streams: AtomicU64::new(0),
@@ -266,6 +268,11 @@ impl EtcdStub {
     /// Hold every `Range` response back for `delay`; the data it carries is read before the wait.
     pub fn delay_range(&self, delay: Duration) {
         *self.state.range_delay.lock().unwrap() = delay;
+    }
+
+    /// Hold every `LeaseTimeToLive` response back for `delay`.
+    pub fn delay_lease(&self, delay: Duration) {
+        *self.state.lease_delay.lock().unwrap() = delay;
     }
 
     pub fn set_mode(&self, mode: Mode) {
@@ -494,7 +501,14 @@ async fn handle(state: Arc<State>, request: Request<Incoming>) -> Response<Out> 
             }
             unary(&response)
         }
-        "LeaseTimeToLive" => unary(&lease_time_to_live(&state, payload)),
+        "LeaseTimeToLive" => {
+            let response = lease_time_to_live(&state, payload);
+            let delay = *state.lease_delay.lock().unwrap();
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            unary(&response)
+        }
         _ => match authenticate(&state, payload) {
             Ok(response) => unary(&response),
             Err((code, message)) => trailers_only(code, message),

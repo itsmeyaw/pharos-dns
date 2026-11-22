@@ -533,6 +533,34 @@ async fn a_hung_etcd_is_a_timeout_error() {
     assert!(started.elapsed() < Duration::from_secs(2));
 }
 
+// CoreDNS v1.15.0 plugin/etcd/etcd.go etcdTimeout: the timeout bounds the whole read, lease lookups included.
+#[tokio::test]
+async fn stalled_lease_lookups_share_the_one_timeout() {
+    let stub = EtcdStub::start().await;
+    for (key, lease) in [("a", 1), ("b", 2), ("c", 3)] {
+        stub.set_lease(lease, 100);
+        stub.put_lease(&format!("/skydns/z/{key}"), HOST, lease);
+    }
+    stub.delay_lease(Duration::from_millis(250));
+    let view = view_with(
+        &stub,
+        limits(),
+        Timeouts {
+            call: Duration::from_millis(400),
+            backoff: Duration::from_millis(100),
+        },
+    );
+    let started = tokio::time::Instant::now();
+    let error = view.get("/skydns/z", true).await.unwrap_err();
+    assert_eq!(error, Error::Client(client::Error::Timeout));
+    assert!(started.elapsed() >= Duration::from_millis(390));
+    assert!(
+        started.elapsed() < Duration::from_millis(700),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
 // CoreDNS v1.15.0 plugin/etcd/etcd.go OnShutdown: closing the client ends the watch.
 #[tokio::test]
 async fn stop_ends_the_watch_and_refuses_reads() {
