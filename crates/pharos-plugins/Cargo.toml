@@ -69,6 +69,7 @@ default = [
     "plugin-tsig",
     "plugin-transfer",
     "plugin-errors",
+    "plugin-etcd",
     "plugin-file",
     "plugin-erratic",
     "plugin-forward",
@@ -159,7 +160,7 @@ plugin-k8s-external = ["plugin-kubernetes"]
 plugin-kubernetes = ["dep:pharos-kubernetes"]
 plugin-file = []
 plugin-secondary = []
-plugin-etcd = []
+plugin-etcd = ["dep:serde", "dep:serde_json"]
 plugin-loop = []
 plugin-forward = []
 plugin-grpc = []
