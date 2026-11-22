@@ -37,6 +37,16 @@ async fn per_query(name: &str, qtype: Type, answers: u16) -> (usize, usize) {
         r#"{"host":"10.0.0.1","port":8080}"#,
     );
     stub.put("/skydns/test/skydns/v6", r#"{"host":"2001:db8::1"}"#);
+    stub.put(
+        "/skydns/test/skydns/t",
+        r#"{"host":"t.example","text":"hello"}"#,
+    );
+    stub.put("/skydns/test/skydns/c", r#"{"host":"other.example"}"#);
+    stub.put("/skydns/test/skydns/cn", r#"{"host":"a.skydns.test."}"#);
+    stub.put(
+        "/skydns/test/skydns/m",
+        r#"{"host":"10.0.0.3","mail":true,"priority":5}"#,
+    );
     let text = format!(
         "skydns.test.:0 {{\n etcd {{\n endpoint {}\n }}\n}}",
         stub.endpoint(false)
@@ -86,38 +96,115 @@ async fn per_query(name: &str, qtype: Type, answers: u16) -> (usize, usize) {
 }
 
 // What a Query costs in Pharos on a view hit, per Query, measured with the Server and the stub in
-// one process. It is not zero: the Plugin builds the owner `Name`, the lookup key and the answer
-// records for each Query (see "Allocations" in the Plugin README). The bounds only go down.
+// one process. The numbers are exact so that a regression, or an improvement, fails the test: an
+// improvement should lower them. Only a host that is a name, whose CNAME chain is chased, allocates
+// (see "Allocations" in the Plugin README).
 async fn check(name: &str, qtype: Type, answers: u16, allocations: usize, reallocations: usize) {
     let (measured, remeasured) = per_query(name, qtype, answers).await;
     println!("{qtype:?}: {measured} allocations, {remeasured} reallocations in {MEASURED} Queries");
-    assert!(measured <= allocations * MEASURED, "{measured} allocations");
-    assert!(
-        remeasured <= reallocations * MEASURED,
-        "{remeasured} reallocations"
+    assert_eq!(
+        (measured, remeasured),
+        (allocations * MEASURED, reallocations * MEASURED)
     );
 }
 
-#[tokio::test]
-async fn warmed_a_hit_allocations_are_pinned() {
-    if crate::run_isolated("etcd::etcd_allocations::warmed_a_hit_allocations_are_pinned") {
-        return;
-    }
-    check("a.skydns.test.", Type::A, 1, 17, 5).await;
+macro_rules! pinned {
+    ($test:ident, $name:literal, $qtype:expr, $answers:literal, $allocations:literal, $reallocations:literal) => {
+        #[tokio::test]
+        async fn $test() {
+            if crate::run_isolated(concat!("etcd::etcd_allocations::", stringify!($test))) {
+                return;
+            }
+            check($name, $qtype, $answers, $allocations, $reallocations).await;
+        }
+    };
 }
 
-#[tokio::test]
-async fn warmed_aaaa_hit_allocations_are_pinned() {
-    if crate::run_isolated("etcd::etcd_allocations::warmed_aaaa_hit_allocations_are_pinned") {
-        return;
-    }
-    check("v6.skydns.test.", Type::AAAA, 1, 17, 5).await;
-}
-
-#[tokio::test]
-async fn warmed_srv_hit_allocations_are_pinned() {
-    if crate::run_isolated("etcd::etcd_allocations::warmed_srv_hit_allocations_are_pinned") {
-        return;
-    }
-    check("a.skydns.test.", Type::SRV, 1, 27, 6).await;
-}
+pinned!(
+    warmed_a_hit_allocations_are_pinned,
+    "a.skydns.test.",
+    Type::A,
+    1,
+    0,
+    0
+);
+pinned!(
+    warmed_aaaa_hit_allocations_are_pinned,
+    "v6.skydns.test.",
+    Type::AAAA,
+    1,
+    0,
+    0
+);
+pinned!(
+    warmed_srv_hit_allocations_are_pinned,
+    "a.skydns.test.",
+    Type::SRV,
+    1,
+    0,
+    0
+);
+pinned!(
+    warmed_txt_hit_allocations_are_pinned,
+    "t.skydns.test.",
+    Type::TXT,
+    1,
+    0,
+    0
+);
+pinned!(
+    warmed_cname_hit_allocations_are_pinned,
+    "c.skydns.test.",
+    Type::CNAME,
+    1,
+    0,
+    0
+);
+pinned!(
+    warmed_ptr_hit_allocations_are_pinned,
+    "c.skydns.test.",
+    Type::PTR,
+    1,
+    0,
+    0
+);
+pinned!(
+    warmed_mx_hit_allocations_are_pinned,
+    "m.skydns.test.",
+    Type::MX,
+    1,
+    0,
+    0
+);
+pinned!(
+    warmed_nodata_hit_allocations_are_pinned,
+    "a.skydns.test.",
+    Type::AAAA,
+    0,
+    0,
+    0
+);
+pinned!(
+    warmed_nxdomain_hit_allocations_are_pinned,
+    "nx.skydns.test.",
+    Type::A,
+    0,
+    0,
+    0
+);
+pinned!(
+    warmed_soa_hit_allocations_are_pinned,
+    "skydns.test.",
+    Type::SOA,
+    1,
+    0,
+    0
+);
+pinned!(
+    warmed_cname_chain_hit_allocations_are_pinned,
+    "cn.skydns.test.",
+    Type::A,
+    2,
+    15,
+    3
+);

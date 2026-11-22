@@ -135,6 +135,10 @@ impl Fixture {
 
     /// Serve one Query; the Response, if the Plugin wrote one.
     async fn exchange(&self, qname: &str, qtype: Type) -> (Outcome, Vec<u8>) {
+        self.exchange_sized(qname, qtype, 512).await
+    }
+
+    async fn exchange_sized(&self, qname: &str, qtype: Type, size: usize) -> (Outcome, Vec<u8>) {
         let name: Name = qname.parse().unwrap();
         let mut wire = Vec::with_capacity(512);
         let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
@@ -142,7 +146,7 @@ impl Fixture {
             .question(name.as_name_ref(), qtype, Class::IN)
             .unwrap();
         let _ = builder.finish();
-        let mut response = Vec::with_capacity(512);
+        let mut response = Vec::with_capacity(size);
         let root: Name = ".".parse().unwrap();
         let mut slots = [None; 8];
         let mut cx = Context {
@@ -154,14 +158,18 @@ impl Fixture {
             domain: &root,
             metadata: Metadata::new(&mut slots),
             response: &mut response,
-            max_response_size: 512,
+            max_response_size: size,
         };
         let outcome = self.etcd.serve(&mut cx, Passed).await;
         (outcome, response)
     }
 
     async fn ask(&self, qname: &str, qtype: Type) -> Reply {
-        let (outcome, response) = self.exchange(qname, qtype).await;
+        self.ask_sized(qname, qtype, 512).await
+    }
+
+    async fn ask_sized(&self, qname: &str, qtype: Type, size: usize) -> Reply {
+        let (outcome, response) = self.exchange_sized(qname, qtype, size).await;
         if outcome != Outcome::Response {
             return Reply {
                 outcome,
@@ -1180,6 +1188,156 @@ async fn the_service_ttl_is_the_record_ttl() {
     f.ask("a.skydns.test.", Type::A).await.expect(
         Rcode::NOERROR,
         &["a.skydns.test. 7 A 10.0.0.1"],
+        &[],
+        &[],
+    );
+}
+
+// CoreDNS v1.15.0 plugin/backend_lookup.go A, AAAA, TXT: one record per distinct host or text.
+#[tokio::test]
+async fn equal_hosts_and_texts_give_one_record() {
+    let services = [
+        ("x.dup.skydns.test.", json!({"host": "10.0.0.1"})),
+        ("y.dup.skydns.test.", json!({"host": "10.0.0.1"})),
+        ("z.dup.skydns.test.", json!({"host": "10.0.0.2"})),
+        ("x.dup6.skydns.test.", json!({"host": "::1"})),
+        ("y.dup6.skydns.test.", json!({"host": "::1"})),
+        (
+            "x.txt.skydns.test.",
+            json!({"host": "t1.example", "text": "hello"}),
+        ),
+        (
+            "y.txt.skydns.test.",
+            json!({"host": "t2.example", "text": "hello"}),
+        ),
+        (
+            "z.txt.skydns.test.",
+            json!({"host": "t3.example", "text": "world"}),
+        ),
+    ];
+    let f = Fixture::new(ZONES, &services).await;
+    f.ask("dup.skydns.test.", Type::A).await.expect(
+        Rcode::NOERROR,
+        &[
+            "dup.skydns.test. 300 A 10.0.0.1",
+            "dup.skydns.test. 300 A 10.0.0.2",
+        ],
+        &[],
+        &[],
+    );
+    f.ask("dup6.skydns.test.", Type::AAAA).await.expect(
+        Rcode::NOERROR,
+        &["dup6.skydns.test. 300 AAAA ::1"],
+        &[],
+        &[],
+    );
+    f.ask("txt.skydns.test.", Type::TXT).await.expect(
+        Rcode::NOERROR,
+        &[
+            "txt.skydns.test. 300 TXT \"hello\"",
+            "txt.skydns.test. 300 TXT \"world\"",
+        ],
+        &[],
+        &[],
+    );
+}
+
+// CoreDNS v1.15.0 plugin/backend_lookup.go SRV: services with one target and port give one record,
+// and one address for each distinct host.
+#[tokio::test]
+async fn srv_with_equal_targets_gives_one_record_per_port() {
+    let services = [
+        (
+            "a.s.skydns.test.",
+            json!({"host": "10.0.0.1", "port": 80, "targetstrip": 1}),
+        ),
+        (
+            "b.s.skydns.test.",
+            json!({"host": "10.0.0.1", "port": 80, "targetstrip": 1}),
+        ),
+        (
+            "c.s.skydns.test.",
+            json!({"host": "10.0.0.2", "port": 80, "targetstrip": 1}),
+        ),
+        (
+            "d.s.skydns.test.",
+            json!({"host": "10.0.0.2", "port": 81, "targetstrip": 1}),
+        ),
+    ];
+    let f = Fixture::new(ZONES, &services).await;
+    f.ask("s.skydns.test.", Type::SRV).await.expect(
+        Rcode::NOERROR,
+        &[
+            "s.skydns.test. 300 SRV 10 25 80 s.skydns.test.",
+            "s.skydns.test. 300 SRV 10 25 81 s.skydns.test.",
+        ],
+        &[],
+        &[
+            "s.skydns.test. 300 A 10.0.0.1",
+            "s.skydns.test. 300 A 10.0.0.2",
+        ],
+    );
+}
+
+// The sets too large to compare pairwise take the allocating path, which gives the same answers.
+#[tokio::test]
+async fn sets_beyond_the_pairwise_limits_are_answered_alike() {
+    let mut services = Vec::new();
+    for index in 0..100 {
+        services.push((
+            format!("k{index}.big.skydns.test."),
+            json!({"host": format!("10.0.0.{}", index % 50), "port": 80}),
+        ));
+    }
+    for index in 0..20 {
+        services.push((
+            format!("k{index}.srv.skydns.test."),
+            json!({"host": format!("10.0.1.{index}"), "port": 80}),
+        ));
+    }
+    let services: Vec<_> = services
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.clone()))
+        .collect();
+    let f = Fixture::new(ZONES, &services).await;
+    let reply = f.ask_sized("big.skydns.test.", Type::A, 4096).await;
+    let expected: Vec<String> = (0..50)
+        .map(|index| format!("big.skydns.test. 300 A 10.0.0.{index}"))
+        .collect();
+    let expected: Vec<&str> = expected.iter().map(String::as_str).collect();
+    reply.expect(Rcode::NOERROR, &expected, &[], &[]);
+    let reply = f.ask_sized("srv.skydns.test.", Type::SRV, 4096).await;
+    assert_eq!(reply.answer.len(), 20);
+    assert_eq!(reply.additional.len(), 20);
+    assert!(reply.answer.iter().all(|r| r.contains("SRV 10 5 80 k")));
+}
+
+// RFC 4343 §3.1: the zone of a Query is found without regard to case, and the key is lowercased.
+#[tokio::test]
+async fn names_are_looked_up_without_regard_to_case() {
+    let f = lookup().await;
+    f.ask("A.Server1.PROD.region1.SkyDNS.test.", Type::A)
+        .await
+        .expect(
+            Rcode::NOERROR,
+            &["A.Server1.PROD.region1.SkyDNS.test. 300 A 10.0.0.1"],
+            &[],
+            &[],
+        );
+}
+
+// CoreDNS v1.15.0 plugin/backend_lookup.go: a CNAME host with no way to chase is no answer, but a service
+// with an address beside it still answers.
+#[tokio::test]
+async fn a_name_host_beside_an_address_takes_the_chase_and_keeps_the_address() {
+    let services = [
+        ("a.mixed.skydns.test.", json!({"host": "10.0.0.1"})),
+        ("b.mixed.skydns.test.", json!({"host": "gone.skydns.test."})),
+    ];
+    let f = Fixture::new(ZONES, &services).await;
+    f.ask("mixed.skydns.test.", Type::A).await.expect(
+        Rcode::NOERROR,
+        &["mixed.skydns.test. 300 A 10.0.0.1"],
         &[],
         &[],
     );
