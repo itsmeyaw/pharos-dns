@@ -94,6 +94,12 @@
 
 - [erratic Plugin notes](../crates/pharos-plugins/src/erratic/README.md)
 
+## etcd
+
+- [etcd Plugin notes](../crates/pharos-plugins/src/etcd/README.md)
+- The `etcd` Directive is allowed once per Server Block, where CoreDNS accepts several. `unix:` and other non-HTTP etcd endpoints are rejected at setup. A missing endpoint port is 443, as in grpc-go. JSON syntax error messages and the handling of invalid UTF-8 in a Service value differ from Go's `encoding/json`.
+- Differential scenarios are skipped: they need a real etcd server.
+
 ## file
 
 - [file Plugin notes](../crates/pharos-plugins/src/file/README.md)
