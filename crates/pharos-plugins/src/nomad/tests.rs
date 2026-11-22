@@ -1,9 +1,7 @@
 use std::time::Duration;
 
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Type};
-use pharos_server::{
-    Context, Error, Metadata, Next, Outcome, Plugin, Protocol, Readiness, Transport,
-};
+use pharos_server::{Context, Error, Metadata, Next, Outcome, Plugin, Protocol, Transport};
 use tokio::net::TcpListener;
 
 use super::*;

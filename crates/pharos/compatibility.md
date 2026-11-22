@@ -207,6 +207,7 @@
 - The syntax is CoreDNS v1.15.0's: one optional `ZONE`, `address`, `filter`, `token` and `ttl`. The issue text (`nomad [ZONES...]`, `fallthrough`) is not v1.15.0; `fallthrough` fails setup as an unknown property, and a Query outside the zone goes to the next Plugin.
 - With several `address` URLs, a Query fails over to the next one on an error instead of probing `/v1/agent/self` first, and Ready comes from a background probe every 5 seconds instead of a probe per `/ready` request. Every Nomad request ends after 5 seconds and replies over 8 MiB are refused; the Go client has no overall timeout.
 - A failed lookup is one empty authoritative NOERROR Response; CoreDNS also writes a second SERVFAIL packet. The error of the NXDOMAIN-with-SOA-in-Answer path is not passed to `errors`.
+- Repeated `nomad` Directives in a Server Block each serve their own zone, chained in order; CoreDNS v1.15.0 reads only the first.
 - `pharos_nomad_*_requests_total` keeps at most 64 distinct `namespace` values per `server` and counts the rest under `_other`; the label comes from the Query name, and CoreDNS does not bound it.
 - `NOMAD_SKIP_VERIFY` and `NOMAD_CAPATH` fail setup. Differential scenarios are skipped: the harness has no shared fake Nomad API.
 
