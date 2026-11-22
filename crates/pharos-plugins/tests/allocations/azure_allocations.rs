@@ -47,7 +47,7 @@ async fn azure_queries_do_not_allocate() {
     })
     .collect();
     let mut response = Vec::with_capacity(512);
-    // One round warms; the next hundred must not allocate.
+    // One round warms; the next hundred must not allocate. The queries avoid the shared Zone Self Lookup paths, which allocate until #86.
     serve_all(chain, &queries, &apex, &mut response, 1).await;
     let before = INSTRUMENTED_SYSTEM.stats();
     serve_all(chain, &queries, &apex, &mut response, 100).await;
