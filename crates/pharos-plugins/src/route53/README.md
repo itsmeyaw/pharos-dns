@@ -4,6 +4,7 @@
 
 ## route53
 
+- Syntax matches CoreDNS: `route53 [ZONE:HOSTED_ZONE_ID...] { aws_access_key ID SECRET; aws_endpoint URL; credentials PROFILE [FILE]; fallthrough [ZONE...]; refresh DURATION; upstream }`. `refresh` defaults to `1m`; a plain integer is seconds, and zero or less is an error. A repeated `ZONE:HOSTED_ZONE_ID` is `conflict zone`, a pair without both halves is `invalid zone`, and an unknown property is an error. `upstream` is accepted and ignored. Setting `AWS_SDK_LOAD_CONFIG` to a true value makes `credentials PROFILE FILE` also read `$HOME/.aws/config`, as CoreDNS does.
 - Each hosted zone is loaded into the shared `Zone` engine (the one `file` serves) and swapped atomically after its own full pagination succeeds. A failed refresh logs `Failed to update zones [...]` at ERROR and keeps serving the last good data; the other hosted zones still update.
 - A hosted zone needs an apex SOA and an apex NS RRset, because every `Zone` does (RFC 1035 §6.1; RFC 2181 §6.1). CoreDNS loads a hosted zone without them and then answers SERVFAIL; Pharos fails setup, or keeps the previous data on a refresh.
 - Record sets whose owner is not at or below the ZONE are dropped with a WARN (RFC 1034 §4.2). CoreDNS inserts them but never serves them. Consequently the NODATA SOA of a hosted zone is the SOA of its own ZONE; the CoreDNS test `split-example.gov.` answers with the `org.` SOA that its fixture inserts into the `gov.` hosted zone.
@@ -15,6 +16,9 @@
 - Setup runs the first load synchronously and fails with `plugin/route53: failed to create route53 client`, `failed to create route53 plugin` (the `ListHostedZonesByName` check) or `failed to initialize route53 plugin`. The refresh loop starts at Startup, stops at Restart and Shutdown, and starts again at RestartFailed; it sleeps `refresh` before each update. The SDK client is built a second time inside the server runtime for the loop, so its connections belong to the runtime that uses them. Failing to build it is logged and retried each interval.
 - Authentication uses the AWS SDK default chain. `aws_access_key ID SECRET` is a static key without session token and still warns as deprecated. `credentials PROFILE FILE` replaces the shared config files and keeps the default credentials file, as CoreDNS's `WithSharedConfigFiles` does. `aws_endpoint` sets the endpoint URL. A region missing from the environment, the shared config and IMDS fails setup instead of hanging.
 - A truncated page without `NextRecordName` or `NextRecordType` is an error; the SDK default retry policy applies to API calls.
+- No metrics: CoreDNS `route53` exports none, and neither does Pharos. The Query path reads the zone snapshot with one `ArcSwap` load and never waits on AWS; a refresh swaps whole `Zone`s, so no lock is held during a lookup (CoreDNS's `lock_repro_test.go` intent is structural here).
+- The Plugin is in the default features and so links the AWS SDK (aws-lc-rs TLS, no `ring`); build `pharos-plugins` without `plugin-route53` to drop it from the binary. `pharos check` runs setup, which makes the first load, so it needs AWS connectivity and credentials for a `route53` Directive.
+- The AWS SDK for Rust replaces aws-sdk-go: its default credential chain, retries and error text differ in detail (for example `aws_endpoint` is an endpoint URL, and the setup error carries the service's code and message).
 - Deferred: alias targets and a zero-allocation Query pin (the Plugin needs a Route 53 endpoint to start, which the allocation harness has none of).
 
 ## Sources
