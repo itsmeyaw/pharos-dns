@@ -526,6 +526,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("acl", include_str!("acl/README.md")),
     ("any", include_str!("any/README.md")),
     ("autopath", include_str!("autopath/README.md")),
+    ("azure", include_str!("azure/README.md")),
     ("bind", include_str!("bind/README.md")),
     ("bufsize", include_str!("bufsize/README.md")),
     ("cache", include_str!("cache/README.md")),

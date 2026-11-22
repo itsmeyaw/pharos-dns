@@ -18,6 +18,11 @@
 - [autopath Plugin notes](../crates/pharos-plugins/src/autopath/README.md)
 - RFC 1034 §4.3.2: a query for exactly the first search suffix is passed to the next Plugin; CoreDNS v1.15.0 returns SERVFAIL (#126).
 
+## azure
+
+- [azure Plugin notes](../crates/pharos-plugins/src/azure/README.md)
+- The properties are CoreDNS v1.15.0's `client` and `secret` with `RESOURCE_GROUP:ZONE` arguments, not the `client_id`, `client_secret` and `ZONE:RESOURCE_GROUP:HOSTED_ZONE` of issue #190. IMDS is not probed at setup (CoreDNS fails setup with `MSI not available`; Pharos logs the token error on each sync and answers SERVFAIL). Client certificate and username/password authentication are unavailable, as in CoreDNS. One Zone serves a name shared by several hosted zones. A record the Zone cannot hold (bad IP, out-of-range number) fails the whole update instead of panicking, and Private DNS zones get an apex NS from the SOA's MNAME.
+
 ## bind
 
 - [bind Plugin notes](../crates/pharos-plugins/src/bind/README.md)
