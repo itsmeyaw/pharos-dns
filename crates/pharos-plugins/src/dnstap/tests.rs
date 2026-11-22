@@ -290,14 +290,27 @@ async fn every_directive_gets_every_message() {
     }
 }
 
-// listener.go Dnstap: a `listen` Directive with no connected collector skips the encoding entirely.
+// listener.go Dnstap: a `listen` Directive with no connected collector skips the encoding, but counts the drop.
 #[tokio::test]
-async fn listen_without_a_collector_queues_nothing() {
+async fn listen_without_a_collector_queues_nothing_and_counts_drops() {
     let dnstap = dnstap(|c| c.role = Role::Listen);
+    let registry = pharos_server::metrics::Registry::default();
+    dnstap.set_metrics(&registry);
     assert!(
         run(&dnstap, Outcome::Response, Some(answer()))
             .await
             .is_empty()
+    );
+    assert_eq!(
+        metric(
+            &registry,
+            "pharos_dnstap_messages_dropped_total{reason=\"no_connection\"}"
+        ),
+        2
+    );
+    assert_eq!(
+        metric(&registry, "pharos_dnstap_messages_enqueued_total"),
+        0
     );
 }
 
