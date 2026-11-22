@@ -17,6 +17,7 @@ independent Corefile examples. Skipped entries explain why they cannot run.
 | bufsize: forward; file | `bufsize-forward`; `bufsize-file-readme` |
 | debug: default | `debug` |
 | pprof: default; alternate address; `block` | Skipped: the harness compares DNS Responses only, and `/debug/pprof` serves per-process HTTP profiles (CoreDNS emits Go profiles Pharos has no counterpart for). Setup and endpoints are covered by `crates/pharos-plugins/tests/functional/pprof_setup.rs` and `crates/pharos-plugins/tests/pprof.rs`. |
+| dnstap: every README example (outgoing unix, TCP and TLS sinks; custom identity, version and `extra`; `listen` on unix, TCP and TLS; several taps) | Skipped: the harness compares DNS Responses only, and `dnstap` writes a Frame Streams side channel to a collector the harness does not run (the examples also name `/tmp` sockets and remote hosts). Setup is covered by the ported `crates/pharos-plugins/src/dnstap/setup/tests.rs`, and the wire output by `crates/pharos-plugins/tests/functional/dnstap.rs`. |
 | shed: forward | `shed` |
 | local: default | `local-readme` |
 | dns64: default; prefix argument; prefix block; translate_all; allow_ipv4 | `dns64-default`; `dns64-prefix`; `dns64-prefix-block`; `dns64-translate-all`; `dns64-allow-ipv4` |

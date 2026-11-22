@@ -16,10 +16,13 @@
 - Metrics, all process-wide: `pharos_dnstap_messages_enqueued_total`, `pharos_dnstap_messages_dropped_total{reason="queue_full|no_connection|write_error"}`, `pharos_dnstap_messages_written_total`, `pharos_dnstap_connect_failures_total`, `pharos_dnstap_reconnects_total`, `pharos_dnstap_connected`.
 - `skipverify` on a dialer skips verification of the collector's certificate chain and name (handshake signatures are still checked); on a `tls://` listener with a CA it makes client certificates optional.
 - The Frame Streams writer buffers 16 KiB before writing; golang-framestream buffers 4 KiB. Frames are flushed every second as in CoreDNS.
+- `forward` taps its exchanges with the Upstream through the `dnstap` Directives of the same Server Block, as CoreDNS `plugin/forward/dnstap.go`: a FORWARDER_QUERY for each exchange, then a FORWARDER_RESPONSE when a reply came back. The messages are from this server's side: `query_address` is the socket toward the Upstream and `response_address` is the Upstream. The protocol follows the transport the exchange used (UDP and QUIC are UDP; TCP, TLS and HTTPS are TCP). An exchange that fails has no socket, so it has no `query_address` and its protocol is the one asked for (`force_tcp`, then `prefer_udp`, then the client's). `forward` does nothing for dnstap, not even read the clock, in a Server Block without a `dnstap` Directive. Another Plugin's `forward` is not tapped: only the Server Block's own `forward` is.
+- Another Plugin taps its own messages with `Dnstap::taps()`: each `Tap` is a clone sharing the Directive's queue, with `include_raw()` for `full`, `send` (no `extra` expansion) and `send_with` (expands `extra` from the Context). A message is built on the stack with `msg::Message` and encoded into a pooled slot, so a warm tap allocates nothing and never blocks. The Chain binds `forward` to the taps of its Server Block at setup; wire a new Plugin the same way in `lib.rs`.
+- Differential scenarios are skipped for every README example: the harness compares DNS Responses only, and the observable output of `dnstap` is a Frame Streams side channel that CoreDNS writes to a collector the harness does not run. Behaviour is pinned by the ported setup, message, writer and listener tests, and by `tests/functional/dnstap.rs`, which runs the Server against a local Frame Streams collector (unix, TCP and TLS, outgoing and `listen`), and by `tests/allocations/dnstap_allocations.rs`.
 
 ## Sources
 
-- Derived from CoreDNS v1.15.0 plugin/dnstap/setup_test.go, msg/msg_test.go, io_test.go, listener_test.go and handler_test.go.
+- Derived from CoreDNS v1.15.0 plugin/dnstap/setup_test.go, msg/msg_test.go, io_test.go, listener_test.go and handler_test.go, and plugin/forward/dnstap.go.
 
 - [CoreDNS v1.15.0 `plugin/dnstap`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/dnstap)
 - [dnstap.proto](https://github.com/dnstap/dnstap.pb/blob/main/dnstap.proto)
