@@ -655,7 +655,7 @@ async fn serve_chain(chain: &Chain, qname: &str) -> (Outcome, Vec<u8>) {
     (outcome, response)
 }
 
-fn configured(
+pub(super) fn configured(
     text: &str,
 ) -> Result<Vec<pharos_corefile::BlockContext<Chain>>, pharos_corefile::Error> {
     let blocks = parse_corefile("Corefile", text)?;

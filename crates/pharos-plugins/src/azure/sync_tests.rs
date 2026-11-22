@@ -209,6 +209,41 @@ fn same(a: &Option<Arc<Zone>>, b: &Option<Arc<Zone>>) -> bool {
     }
 }
 
+// Issue #190: Corefile -> setup -> Startup sync -> Query. The Corefile cannot name a stub (the endpoints come from `environment`), so the parsed Config is rebuilt against local endpoints.
+#[tokio::test]
+async fn corefile_setup_startup_sync_then_query() {
+    let stub = Stub::start(|request| {
+        if is_token(request.path()) {
+            return Reply::ok(r#"{"access_token":"t","expires_in":"3600"}"#);
+        }
+        match zone_of(request.path()) {
+            Some("example.org") => Reply::ok(records_body(false, "example.org", "", true, true)),
+            _ => Reply::status(404, "unexpected API path"),
+        }
+    })
+    .await;
+    let blocks = crate::azure::tests::configured(
+        "example.org:53 {\n azure rg:example.org {\n  tenant t\n  client c\n  secret sekrit\n  subscription sub\n  refresh 1m\n }\n}",
+    )
+    .unwrap();
+    let config = blocks[0].config.azure.as_ref().unwrap().config().clone();
+    let base = stub.base();
+    let endpoints = Endpoints {
+        resource_manager: base.clone(),
+        active_directory: base.clone(),
+        imds: format!("{base}imds/metadata/identity/oauth2/token"),
+    };
+    let azure = Azure::with_settings(config, &endpoints, |_| None, Tuning::default()).unwrap();
+    assert_eq!(
+        ask(&azure, "www.example.org", Type::A).await.outcome,
+        Outcome::Unanswered(pharos_proto::Rcode::SERVFAIL)
+    );
+    let lifecycle = lifecycle(&azure);
+    lifecycle.run(Phase::Startup).await.unwrap();
+    wait_for_answer(&azure, "example.org").await;
+    lifecycle.run(Phase::Shutdown).await.unwrap();
+}
+
 // CoreDNS v1.15.0 plugin/azure/sync_test.go TestNewDoesNotContactAzure.
 #[tokio::test]
 async fn construction_makes_no_http_request() {
