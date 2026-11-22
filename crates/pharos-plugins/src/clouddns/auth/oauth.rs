@@ -12,6 +12,7 @@ use crate::clouddns::http::{Http, Request, Response};
 struct TokenResponse {
     access_token: Option<Secret>,
     expires_in: Option<Value>,
+    refresh_token: Option<Secret>,
 }
 
 /// Send `request` to a token-issuing endpoint and read an RFC 6749 §5.1 response.
@@ -25,8 +26,8 @@ pub(crate) async fn fetch_token(http: &Http, request: Request) -> Result<Fetched
         .filter(|token| !token.is_empty())
         .ok_or_else(|| AuthError::new("response has no access_token"))?;
     Ok(Fetched {
-        token,
-        lifetime: parsed.expires_in.as_ref().and_then(seconds),
+        refresh_token: parsed.refresh_token.filter(|token| !token.is_empty()),
+        ..Fetched::new(token, parsed.expires_in.as_ref().and_then(seconds))
     })
 }
 

@@ -6,7 +6,7 @@ use std::{
 use super::TokenSource;
 use crate::clouddns::{
     auth::{
-        Provider,
+        DNS_SCOPES, Provider,
         service_account::{File, ServiceAccount},
         testing::{service_account_file, token_response},
     },
@@ -16,7 +16,7 @@ use crate::clouddns::{
 
 fn source(stub: &Stub, margin: Duration) -> TokenSource {
     let file: File = serde_json::from_value(service_account_file(&stub.url("/token"))).unwrap();
-    let provider = Provider::ServiceAccount(ServiceAccount::from_file(file).unwrap());
+    let provider = Provider::ServiceAccount(ServiceAccount::from_file(file, &DNS_SCOPES).unwrap());
     TokenSource::with_margin(provider, Http::default(), margin)
 }
 

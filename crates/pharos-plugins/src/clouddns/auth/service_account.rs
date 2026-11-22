@@ -17,7 +17,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::{
-    DEFAULT_TOKEN_URI, DNS_SCOPES,
+    DEFAULT_TOKEN_URI,
     oauth::fetch_token,
     token::{AuthError, Fetched, Secret},
 };
@@ -43,6 +43,7 @@ pub(crate) struct ServiceAccount {
     private_key_id: String,
     key: RsaKeyPair,
     token_uri: String,
+    scope: String,
 }
 
 impl fmt::Debug for ServiceAccount {
@@ -55,7 +56,7 @@ impl fmt::Debug for ServiceAccount {
 }
 
 impl ServiceAccount {
-    pub(super) fn from_file(file: File) -> Result<Self, AuthError> {
+    pub(super) fn from_file(file: File, scopes: &[&str]) -> Result<Self, AuthError> {
         // cloud.google.com/go/auth Options2LO.validate: the email and the private key are required.
         let client_email = file
             .client_email
@@ -69,6 +70,8 @@ impl ServiceAccount {
             client_email,
             private_key_id: file.private_key_id.unwrap_or_default(),
             key: parse_private_key(private_key.expose())?,
+            // RFC 6749 §3.3: the scope is a space-delimited list.
+            scope: scopes.join(" "),
             // cloud.google.com/go/auth handleServiceAccount: an absent token_uri is the Google token URL.
             token_uri: file
                 .token_uri
@@ -97,7 +100,7 @@ impl ServiceAccount {
         let header = json!({"alg": "RS256", "typ": "JWT", "kid": self.private_key_id});
         let claims = json!({
             "iss": self.client_email,
-            "scope": DNS_SCOPES.join(" "),
+            "scope": self.scope,
             "aud": self.token_uri,
             "iat": issued,
             "exp": issued + LIFETIME_SECONDS,

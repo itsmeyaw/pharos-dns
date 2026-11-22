@@ -1,5 +1,7 @@
 //! Google credentials: credential files, Application Default Credentials and cached access tokens.
 
+mod authorized_user;
+mod metadata;
 mod oauth;
 mod service_account;
 mod token;
@@ -26,12 +28,16 @@ const DNS_SCOPES: [&str; 4] = [
 /// Where an access token comes from.
 pub(crate) enum Provider {
     ServiceAccount(service_account::ServiceAccount),
+    AuthorizedUser(authorized_user::AuthorizedUser),
+    Metadata(metadata::Metadata),
 }
 
 impl fmt::Debug for Provider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ServiceAccount(source) => source.fmt(f),
+            Self::AuthorizedUser(source) => source.fmt(f),
+            Self::Metadata(source) => source.fmt(f),
         }
     }
 }
@@ -40,6 +46,8 @@ impl Provider {
     pub(crate) async fn fetch(&self, http: &Http) -> Result<Fetched, AuthError> {
         match self {
             Self::ServiceAccount(source) => source.fetch(http).await,
+            Self::AuthorizedUser(source) => source.fetch(http).await,
+            Self::Metadata(source) => source.fetch(http).await,
         }
     }
 }

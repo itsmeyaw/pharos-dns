@@ -78,6 +78,18 @@ impl std::error::Error for AuthError {}
 pub(crate) struct Fetched {
     pub token: Secret,
     pub lifetime: Option<Duration>,
+    /// RFC 6749 §6: a refresh response may replace the refresh token.
+    pub refresh_token: Option<Secret>,
+}
+
+impl Fetched {
+    pub(crate) fn new(token: Secret, lifetime: Option<Duration>) -> Self {
+        Self {
+            token,
+            lifetime,
+            refresh_token: None,
+        }
+    }
 }
 
 #[derive(Debug)]

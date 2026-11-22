@@ -12,7 +12,7 @@ use crate::clouddns::{
 
 fn account(file: serde_json::Value) -> Result<ServiceAccount, String> {
     let file: File = serde_json::from_value(file).unwrap();
-    ServiceAccount::from_file(file).map_err(|error| error.to_string())
+    ServiceAccount::from_file(file, &DNS_SCOPES).map_err(|error| error.to_string())
 }
 
 #[tokio::test]

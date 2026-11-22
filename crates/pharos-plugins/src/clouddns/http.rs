@@ -104,6 +104,7 @@ pub(crate) struct Request {
     headers: Vec<(HeaderName, HeaderValue)>,
     content_type: Option<&'static str>,
     body: Vec<u8>,
+    timeout: Option<Duration>,
 }
 
 impl fmt::Debug for Request {
@@ -145,7 +146,14 @@ impl Request {
             headers: Vec::new(),
             content_type,
             body,
+            timeout: None,
         }
+    }
+
+    /// Shorten the time allowed for this request; it never extends the client's limit.
+    pub(crate) fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
     }
 
     /// A header that is not secret; errors when the name or value is not valid HTTP.
@@ -222,7 +230,10 @@ impl Http {
     /// Send one request; redirects are not followed. Errors never repeat request headers or bodies.
     pub(crate) async fn send(&self, request: Request) -> io::Result<Response> {
         let url: Url = request.url.parse().map_err(|()| invalid("URL"))?;
-        timeout(self.timeout, self.exchange(request, &url))
+        let limit = request
+            .timeout
+            .map_or(self.timeout, |own| own.min(self.timeout));
+        timeout(limit, self.exchange(request, &url))
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "request timed out"))?
     }
