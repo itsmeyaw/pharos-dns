@@ -16,6 +16,12 @@
 - Only class IN is served. Queries for other classes, and for names outside every ZONE, go to the next Plugin.
 - No differential scenario exists: the Plugin reads Google Cloud DNS, which the harness cannot reach. The ported CoreDNS tests and the integration tests in `tests/functional/clouddns.rs` run against local stubs of the OAuth and Cloud DNS endpoints.
 
+## Deferred
+
+- `external_account` credential sources `aws`, `executable` and `certificate`.
+- GCE detection before the metadata server is used: a host with no credentials fails at the first token fetch (Startup), not at discovery.
+- DRY follow-up: `http.rs` duplicates the small HTTP/1.1 client of the `tls` ACME code (and of the other cloud Plugins); fold them into one shared client once all have landed.
+
 ## Sources
 
 - [CoreDNS v1.15.0 `plugin/clouddns`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/clouddns)
