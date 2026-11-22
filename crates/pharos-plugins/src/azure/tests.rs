@@ -7,7 +7,7 @@ use pharos_server::{Context, Next, Outcome, Plugin, Protocol, Transport};
 use super::{Azure, Environment, config::DEFAULT_REFRESH, setup};
 use crate::{Chain, zone::Zone};
 
-fn config(text: &str) -> super::Config {
+pub(super) fn config(text: &str) -> super::Config {
     let tokens = lex("Corefile", text);
     setup::parse(&mut Cursor::new("Corefile", &tokens))
         .unwrap_or_else(|error| panic!("{text}: {error}"))
@@ -72,19 +72,19 @@ impl Next for TestNext<'_> {
     }
 }
 
-struct Reply {
-    outcome: Outcome,
+pub(super) struct Reply {
+    pub(super) outcome: Outcome,
     response: Vec<u8>,
-    next_calls: usize,
+    pub(super) next_calls: usize,
 }
 
 impl Reply {
-    fn message(&self) -> Message<'_> {
+    pub(super) fn message(&self) -> Message<'_> {
         Message::parse(&self.response).unwrap()
     }
 
     /// The Answer section in miekg/dns RR.String form.
-    fn answers(&self) -> Vec<String> {
+    pub(super) fn answers(&self) -> Vec<String> {
         self.message().answers().map(|rr| render(&rr)).collect()
     }
 
@@ -114,7 +114,7 @@ fn query(qname: &str, qtype: Type) -> Vec<u8> {
     wire
 }
 
-async fn ask(azure: &Azure, qname: &str, qtype: Type) -> Reply {
+pub(super) async fn ask(azure: &Azure, qname: &str, qtype: Type) -> Reply {
     let wire = query(qname, qtype);
     let calls = AtomicUsize::new(0);
     let domain = root();

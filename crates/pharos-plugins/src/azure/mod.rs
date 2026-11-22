@@ -1,7 +1,18 @@
 //! Serve Zones mirrored from Azure DNS and Azure Private DNS hosted zones.
 
+mod auth;
+mod client;
 mod config;
+mod http;
+mod records;
+#[cfg(test)]
+mod records_tests;
 pub(crate) mod setup;
+#[cfg(test)]
+mod stub;
+mod sync;
+#[cfg(test)]
+mod sync_tests;
 #[cfg(test)]
 mod tests;
 
@@ -13,6 +24,9 @@ use pharos_server::{Context, Next, Outcome, Plugin};
 pub use config::{Config, Environment, Secret, ZoneSpec};
 
 use crate::zone::{Zone, ZoneHolder, contains};
+use auth::Endpoints;
+use client::{Client, Tuning};
+use sync::Syncer;
 
 /// One Azure hosted zone and the Zone last loaded from it; empty until the first successful sync.
 #[derive(Debug)]
@@ -40,11 +54,27 @@ pub struct Azure {
     /// Hosted zones in Corefile order; several may share one zone name.
     zones: Vec<Arc<HostedZone>>,
     fallthrough: Vec<Name>,
+    syncer: Arc<Syncer>,
 }
 
 impl Azure {
     /// CoreDNS v1.15.0 plugin/azure/azure.go New: configure every Zone without contacting Azure.
     pub fn new(config: Config) -> Result<Self, String> {
+        let endpoints = Endpoints::for_environment(config.environment);
+        Self::with_settings(
+            config,
+            &endpoints,
+            |name| std::env::var(name).ok(),
+            Tuning::default(),
+        )
+    }
+
+    fn with_settings(
+        config: Config,
+        endpoints: &Endpoints,
+        env: impl Fn(&str) -> Option<String>,
+        tuning: Tuning,
+    ) -> Result<Self, String> {
         let root: Name = ".".parse().map_err(|_| "invalid root name".to_owned())?;
         let mut names = Vec::with_capacity(config.zones.len());
         let mut zones = Vec::with_capacity(config.zones.len());
@@ -69,11 +99,21 @@ impl Azure {
                     .map_err(|_| format!("invalid fallthrough zone {domain:?}"))?,
             );
         }
+        // CoreDNS v1.15.0 plugin/azure/setup.go: credentials are resolved at setup, Azure is contacted only by the sync task.
+        let client = Client::new(&config, endpoints, env, tuning)?;
+        let syncer = Arc::new(Syncer::new(
+            client,
+            zones.clone(),
+            &names,
+            config.refresh,
+            tuning.list_timeout,
+        ));
         Ok(Self {
             config,
             names,
             zones,
             fallthrough,
+            syncer,
         })
     }
 
@@ -91,8 +131,29 @@ impl Azure {
         &self.names
     }
 
-    /// Registers the background sync; the Zones stay unloaded, and Queries get SERVFAIL, until it runs.
-    pub(crate) fn register_hooks(&self, _lifecycle: &mut pharos_server::Lifecycle) {}
+    /// Registers the background sync; the Zones stay unloaded, and Queries get SERVFAIL, until it loads them.
+    pub(crate) fn register_hooks(&self, lifecycle: &mut pharos_server::Lifecycle) {
+        use pharos_server::Phase;
+        // CoreDNS v1.15.0 plugin/azure/setup.go: OnStartup runs the sync in the background and never waits for Azure.
+        let syncer = Arc::clone(&self.syncer);
+        let start = move || {
+            syncer.start();
+            Ok(())
+        };
+        lifecycle.register_sync(Phase::Startup, start.clone());
+        lifecycle.register_sync(Phase::RestartFailed, start);
+        // CoreDNS v1.15.0 plugin/azure/setup.go: OnShutdown cancels the sync and waits for it to end.
+        let syncer = Arc::clone(&self.syncer);
+        let stop = move || {
+            let syncer = Arc::clone(&syncer);
+            async move {
+                syncer.stop().await;
+                Ok(())
+            }
+        };
+        lifecycle.register(Phase::Restart, stop.clone());
+        lifecycle.register(Phase::Shutdown, stop);
+    }
 
     /// The hosted zone of `apex` that answers `name`.
     fn select(&self, apex: &Name, name: &[u8]) -> Option<&Arc<HostedZone>> {
