@@ -69,6 +69,6 @@ pub(super) fn verify_jwt(jwt: &str, public: &[u8]) -> (Value, Value) {
 }
 
 /// A token endpoint success body.
-pub(super) fn token_response(token: &str, expires_in: u64) -> Value {
+pub(crate) fn token_response(token: &str, expires_in: u64) -> Value {
     json!({"access_token": token, "expires_in": expires_in, "token_type": "Bearer"})
 }

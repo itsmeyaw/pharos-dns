@@ -16,6 +16,7 @@ use token::Fetched;
 
 pub(crate) use adc::Environment;
 pub(crate) use file::{CredentialType, credential_type};
+pub(crate) use oauth::{error_code, json_error};
 pub(crate) use token::{AccessToken, AuthError, TokenSource};
 
 use super::http::Http;
@@ -65,4 +66,4 @@ impl Provider {
 }
 
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
