@@ -2,7 +2,7 @@
 use std::net::SocketAddr;
 
 use pharos_server::tls::{ClientOptions, ServerName, TlsConnector, client_config};
-use tokio::net::UnixStream;
+use tokio::{io::AsyncReadExt, net::UnixStream};
 
 use super::*;
 use crate::dnstap::{
@@ -148,6 +148,35 @@ async fn a_silent_client_does_not_block_others() {
     running.sinks(1).await;
     running.tap.send(&query(3));
     assert_eq!(collector.number().await, 3);
+    running.stop().await;
+}
+
+// Pharos hardening: handshakes in flight are capped, and a peer beyond the cap is closed at once.
+#[tokio::test]
+async fn peers_beyond_the_handshake_cap_are_closed_at_once() {
+    let running = Running::tcp(listening(Endpoint::Tcp("127.0.0.1:0".into()))).await;
+    let mut silent = Vec::new();
+    for _ in 0..MAX_HANDSHAKES {
+        silent.push(TcpStream::connect(running.address).await.unwrap());
+    }
+    let mut excess = TcpStream::connect(running.address).await.unwrap();
+    let mut byte = [0];
+    let closed = tokio::time::timeout(Duration::from_millis(400), excess.read(&mut byte))
+        .await
+        .expect("excess peer is closed before the handshakes time out");
+    assert!(matches!(closed, Ok(0) | Err(_)));
+    // Once the silent handshakes time out their slots are free again.
+    drop(silent);
+    let mut collector = loop {
+        let tcp = TcpStream::connect(running.address).await.unwrap();
+        if let Ok(collector) = Collector::accept(tcp).await {
+            break collector;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    running.sinks(1).await;
+    running.tap.send(&query(9));
+    assert_eq!(collector.number().await, 9);
     running.stop().await;
 }
 

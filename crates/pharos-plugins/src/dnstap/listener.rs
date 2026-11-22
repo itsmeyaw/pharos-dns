@@ -4,7 +4,7 @@
 //! whose write fails is closed alone. CoreDNS writes from the Query's own goroutine; here the Query
 //! path only encodes onto the shared queue and this task writes, so a slow collector never delays a Query.
 
-use std::{collections::VecDeque, io, time::Duration};
+use std::{collections::VecDeque, io, sync::Arc, time::Duration};
 
 use pharos_server::{
     metrics::DnstapDrop,
@@ -12,7 +12,7 @@ use pharos_server::{
 };
 use tokio::{
     net::{TcpListener, TcpStream, UnixListener},
-    sync::{mpsc, watch},
+    sync::{Semaphore, mpsc, watch},
     task::JoinSet,
     time::{MissedTickBehavior, interval, sleep},
 };
@@ -29,6 +29,10 @@ mod tests;
 
 // CoreDNS v1.15.0 plugin/dnstap/listener.go acceptLoop: a brief pause after an accept error.
 const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
+
+// Pharos hardening: CoreDNS spawns a goroutine per accepted peer; here each in-flight handshake holds a socket and
+// TLS state for up to `timeout * 4`, so their number is capped and a peer beyond the cap is closed at once.
+const MAX_HANDSHAKES: usize = 64;
 
 pub(super) enum Bound {
     Unix(UnixListener, String),
@@ -110,6 +114,7 @@ pub(super) async fn run(tap: Tap, bound: Option<Bound>, mut stopped: watch::Rece
     let timing = tap.0.timing;
     let (ready_tx, mut ready) = mpsc::channel::<Link>(16);
     let mut handshakes = JoinSet::new();
+    let permits = Arc::new(Semaphore::new(MAX_HANDSHAKES));
     let mut clients: Vec<Link> = Vec::new();
     let mut batch = VecDeque::new();
     let mut report = interval(timing.report);
@@ -122,9 +127,13 @@ pub(super) async fn run(tap: Tap, bound: Option<Bound>, mut stopped: watch::Rece
             _ = stopped.changed() => break,
             accepted = bound.accept() => match accepted {
                 Ok(incoming) => {
+                    let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+                        continue;
+                    };
                     // CoreDNS v1.15.0 plugin/dnstap/listener.go acceptLoop: the Frame Streams handshake gates a collector joining.
                     let ready_tx = ready_tx.clone();
                     handshakes.spawn(async move {
+                        let _permit = permit;
                         let handshake = async {
                             let stream: Box<dyn Stream> = match incoming {
                                 Incoming::Stream(stream) => stream,
