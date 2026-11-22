@@ -147,7 +147,7 @@ async fn an_empty_or_malformed_body_is_an_error() {
     let client = client(&[&address]);
     for service in ["empty", "bad"] {
         let error = get(&client, service).await.unwrap_err();
-        assert!(matches!(error, Error::Decode(_)), "{error}");
+        assert!(matches!(error, Error::Decode { .. }), "{error}");
     }
 }
 
@@ -416,4 +416,57 @@ fn unsupported_and_lopsided_tls_environment_is_refused() {
     let error =
         Options::from_env(&env(&[("NOMAD_CACERT", "/nonexistent.pem")]), None, true).unwrap_err();
     assert!(!error.is_empty());
+}
+
+// Errors are logged and returned as text: whatever Nomad echoes back, the token and password stay out of it.
+#[tokio::test]
+async fn no_error_text_contains_the_credentials() {
+    const SECRET: &str = "tok-SECRET-123";
+    let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_address = format!("http://{}", dead.local_addr().unwrap());
+    drop(dead);
+    let replies = [
+        (403, format!("denied for {SECRET}"), false),
+        (200, format!("{{\"Address\":\"{SECRET}\"}}"), false),
+        (200, SECRET.to_owned(), false),
+        (200, format!("[{{\"Port\":\"{SECRET}\"}}]"), false),
+        (200, String::new(), true),
+    ];
+    let mut texts = Vec::new();
+    for (status, body, stall) in replies {
+        let stub = Stub::default();
+        let address = stub
+            .tcp(move |_| Reply {
+                status,
+                body: body.clone().into(),
+                close: false,
+                stall,
+            })
+            .await;
+        let mut client = Client::new(
+            &[address],
+            Options {
+                token: Some(SECRET.to_owned()),
+                basic_auth: Some(format!("user:{SECRET}")),
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        client.timeout = Duration::from_millis(100);
+        let error = get(&client, "example").await.unwrap_err();
+        texts.push(format!("{error} {error:?}"));
+    }
+    let client = Client::new(
+        &[dead_address],
+        Options {
+            token: Some(SECRET.to_owned()),
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    let error = get(&client, "example").await.unwrap_err();
+    texts.push(format!("{error} {error:?}"));
+    for text in texts {
+        assert!(!text.contains(SECRET), "{text}");
+    }
 }

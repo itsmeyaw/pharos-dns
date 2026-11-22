@@ -47,7 +47,11 @@ pub(super) enum Error {
     /// Hashicorp nomad api v1.10.5 api/api.go `requireOK`: only 200 is success.
     Status(u16),
     TooLarge,
-    Decode(serde_json::Error),
+    /// Where the body went wrong. serde's own message quotes the offending value, which Nomad chose, so it is dropped.
+    Decode {
+        line: usize,
+        column: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -58,7 +62,9 @@ impl fmt::Display for Error {
             Self::Timeout => f.write_str("request timed out"),
             Self::Status(status) => write!(f, "unexpected response code: {status}"),
             Self::TooLarge => f.write_str("response body too large"),
-            Self::Decode(error) => write!(f, "invalid response body: {error}"),
+            Self::Decode { line, column } => {
+                write!(f, "invalid response body at line {line} column {column}")
+            }
         }
     }
 }
@@ -338,7 +344,10 @@ impl Client {
 
     async fn get(&self, endpoint: &Endpoint, target: &str) -> Result<Vec<Registration>, Error> {
         let body = self.fetch(endpoint, target).await?;
-        registration::decode(&body).map_err(Error::Decode)
+        registration::decode(&body).map_err(|error| Error::Decode {
+            line: error.line(),
+            column: error.column(),
+        })
     }
 
     async fn fetch(&self, endpoint: &Endpoint, target: &str) -> Result<Vec<u8>, Error> {
