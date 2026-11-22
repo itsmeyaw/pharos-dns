@@ -1,6 +1,10 @@
 //! Google credentials: credential files, Application Default Credentials and cached access tokens.
 
+mod adc;
 mod authorized_user;
+mod external_account;
+mod file;
+mod impersonated;
 mod metadata;
 mod oauth;
 mod service_account;
@@ -8,9 +12,11 @@ mod token;
 
 use std::fmt;
 
-use token::{AuthError, Fetched};
+use token::Fetched;
 
-pub(crate) use token::TokenSource;
+pub(crate) use adc::Environment;
+pub(crate) use file::{CredentialType, credential_type};
+pub(crate) use token::{AccessToken, AuthError, TokenSource};
 
 use super::http::Http;
 
@@ -30,6 +36,8 @@ pub(crate) enum Provider {
     ServiceAccount(service_account::ServiceAccount),
     AuthorizedUser(authorized_user::AuthorizedUser),
     Metadata(metadata::Metadata),
+    Impersonated(impersonated::Impersonated),
+    ExternalAccount(external_account::ExternalAccount),
 }
 
 impl fmt::Debug for Provider {
@@ -38,6 +46,8 @@ impl fmt::Debug for Provider {
             Self::ServiceAccount(source) => source.fmt(f),
             Self::AuthorizedUser(source) => source.fmt(f),
             Self::Metadata(source) => source.fmt(f),
+            Self::Impersonated(source) => source.fmt(f),
+            Self::ExternalAccount(source) => source.fmt(f),
         }
     }
 }
@@ -48,6 +58,8 @@ impl Provider {
             Self::ServiceAccount(source) => source.fetch(http).await,
             Self::AuthorizedUser(source) => source.fetch(http).await,
             Self::Metadata(source) => source.fetch(http).await,
+            Self::Impersonated(source) => source.fetch(http).await,
+            Self::ExternalAccount(source) => source.fetch(http).await,
         }
     }
 }

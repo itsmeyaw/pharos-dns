@@ -5,6 +5,7 @@
 
 use std::{fmt, io, str::FromStr, sync::Arc, time::Duration};
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{
@@ -165,9 +166,20 @@ impl Request {
     }
 
     /// RFC 6750 §2.1: the Bearer scheme; the value is marked sensitive so hyper never prints it.
-    pub(crate) fn bearer(mut self, token: &str) -> io::Result<Self> {
-        let mut value = HeaderValue::from_str(&format!("Bearer {token}"))
-            .map_err(|_| invalid("bearer token"))?;
+    pub(crate) fn bearer(self, token: &str) -> io::Result<Self> {
+        self.authorization(&format!("Bearer {token}"))
+    }
+
+    /// RFC 7617 §2: the Basic scheme, `base64(user ":" password)`.
+    pub(crate) fn basic(self, user: &str, password: &str) -> io::Result<Self> {
+        self.authorization(&format!(
+            "Basic {}",
+            STANDARD.encode(format!("{user}:{password}"))
+        ))
+    }
+
+    fn authorization(mut self, credentials: &str) -> io::Result<Self> {
+        let mut value = HeaderValue::from_str(credentials).map_err(|_| invalid("credentials"))?;
         value.set_sensitive(true);
         self.headers.push((header::AUTHORIZATION, value));
         Ok(self)
