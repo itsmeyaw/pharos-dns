@@ -42,6 +42,8 @@ pub mod cache;
 pub mod cancel;
 #[cfg(feature = "plugin-chaos")]
 pub mod chaos;
+#[cfg(feature = "plugin-clouddns")]
+pub mod clouddns;
 #[cfg(feature = "plugin-debug")]
 pub mod debug;
 #[cfg(any(feature = "plugin-kubernetes", feature = "plugin-k8s-external"))]
