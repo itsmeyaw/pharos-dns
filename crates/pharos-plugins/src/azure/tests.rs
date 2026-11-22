@@ -612,6 +612,19 @@ async fn the_first_loaded_copy_holding_the_name_answers() {
     );
 }
 
+// A refresh may swap a copy between the existence check and the answer; the Zone that was checked is the one served.
+#[test]
+fn select_returns_the_zone_it_checked() {
+    let azure = azure("azure one:example.org two:example.org");
+    azure.hosted_zones()[0].publish(simple_zone("example.org.", "www 60 IN A 192.0.2.1\n"));
+    azure.hosted_zones()[1].publish(simple_zone("example.org.", "www 60 IN A 192.0.2.2\n"));
+    let apex: Name = "example.org.".parse().unwrap();
+    let name = Name::parse("www.example.org", &root()).unwrap();
+    let picked = azure.select(&apex, name.as_wire()).unwrap();
+    azure.hosted_zones()[0].publish(simple_zone("example.org.", ""));
+    assert!(picked.exists(name.as_wire()));
+}
+
 #[tokio::test]
 async fn a_new_snapshot_replaces_the_old_one_atomically() {
     let azure = azure("azure rg:example.org");

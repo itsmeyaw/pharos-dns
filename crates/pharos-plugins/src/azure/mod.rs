@@ -155,16 +155,16 @@ impl Azure {
         lifecycle.register(Phase::Shutdown, stop);
     }
 
-    /// The hosted zone of `apex` that answers `name`.
-    fn select(&self, apex: &Name, name: &[u8]) -> Option<&Arc<HostedZone>> {
+    /// The Zone of `apex` that answers `name`; it is the snapshot that was checked, so a refresh cannot swap it away.
+    fn select(&self, apex: &Name, name: &[u8]) -> Option<Arc<Zone>> {
         let mut last_loaded = None;
         for hosted in self.zones.iter().filter(|hosted| hosted.apex == *apex) {
             // RFC 8020 §3.1: the first loaded copy that holds the name answers, as CoreDNS stops at the first answer or NODATA.
-            if let Some(zone) = hosted.current.load().as_ref() {
+            if let Some(zone) = hosted.current.load_full() {
                 if zone.exists(name) {
-                    return Some(hosted);
+                    return Some(zone);
                 }
-                last_loaded = Some(hosted);
+                last_loaded = Some(zone);
             }
         }
         // CoreDNS v1.15.0 plugin/azure/azure.go ServeDNS: when no copy holds the name the last lookup's NXDOMAIN stands.
@@ -213,10 +213,7 @@ impl Azure {
         else {
             return Pick::Pass;
         };
-        match self
-            .select(apex, name)
-            .and_then(|hosted| hosted.current.load_full())
-        {
+        match self.select(apex, name) {
             Some(zone) => Pick::Zone(zone),
             // CoreDNS v1.15.0 plugin/azure/azure.go ServeDNS: a Zone without records has no answer, so Fallthrough applies, else SERVFAIL.
             None if self.fallthrough.iter().any(|zone| contains(name, zone)) => Pick::Pass,
