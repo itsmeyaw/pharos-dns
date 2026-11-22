@@ -253,6 +253,13 @@ insights.
 - Copyright 2015 Light Code Labs, LLC
 - The signal and exit-code behavior in `crates/pharos` follows coredns/caddy v1.1.4's `sigtrap.go`, `sigtrap_posix.go`, and `caddy.go`.
 
+## Azure/go-autorest
+
+- Source: https://github.com/Azure/go-autorest (tag `autorest/v0.11.30`)
+- License: Apache-2.0
+- Copyright 2015 Microsoft Corporation
+- The authentication, cloud environment endpoints, token refresh and retry behavior in `crates/pharos-plugins/src/azure` follow go-autorest v0.11.30's `autorest/azure/auth`, `autorest/azure/environments.go`, `autorest/adal` and `autorest` defaults, as used by CoreDNS v1.15.0's `plugin/azure`.
+
 ## miekg/dns
 
 - Source: https://github.com/miekg/dns
