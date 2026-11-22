@@ -60,6 +60,7 @@ default = [
     "plugin-bufsize",
     "plugin-cache",
     "plugin-chaos",
+    "plugin-clouddns",
     "plugin-dns64",
     "plugin-dnssec",
     "plugin-dnstap",

@@ -534,6 +534,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("cache", include_str!("cache/README.md")),
     ("cancel", include_str!("cancel/README.md")),
     ("chaos", include_str!("chaos/README.md")),
+    ("clouddns", include_str!("clouddns/README.md")),
     ("debug", include_str!("debug/README.md")),
     ("dns64", include_str!("dns64/README.md")),
     ("dnssec", include_str!("dnssec/README.md")),

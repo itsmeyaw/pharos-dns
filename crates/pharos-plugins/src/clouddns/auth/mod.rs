@@ -15,9 +15,9 @@ use std::fmt;
 use token::Fetched;
 
 pub(crate) use adc::Environment;
-pub(crate) use file::{CredentialType, credential_type};
+pub(crate) use file::credential_type;
 pub(crate) use oauth::{error_code, json_error};
-pub(crate) use token::{AccessToken, AuthError, TokenSource};
+pub(crate) use token::{AuthError, TokenSource};
 
 use super::http::Http;
 
