@@ -168,6 +168,12 @@ mod dnssec {
 }
 
 #[path = "allocations"]
+mod dnstap {
+    #[path = "dnstap_allocations.rs"]
+    mod dnstap_allocations;
+}
+
+#[path = "allocations"]
 mod forward {
     #[path = "forward_allocations.rs"]
     mod forward_allocations;
