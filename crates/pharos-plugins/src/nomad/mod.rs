@@ -45,7 +45,7 @@ impl std::fmt::Debug for Settings {
     }
 }
 
-/// One `nomad` Directive.
+/// One `nomad` Directive, followed by any later ones of the Server Block.
 #[derive(Debug)]
 pub struct Nomad {
     ttl: u32,
@@ -59,6 +59,9 @@ pub struct Nomad {
     health: Arc<Health>,
     /// The metrics of each Listener, found by the Query's local address.
     metrics: Vec<(SocketAddr, NomadMetrics)>,
+    /// The later `nomad` Directives of the Server Block, in Corefile order.
+    // CoreDNS v1.15.0 plugin/nomad/setup.go setup: `AddPlugin` chains one instance per Directive; the first whose zone holds the name answers.
+    more: Vec<Nomad>,
 }
 
 impl Nomad {
@@ -100,7 +103,13 @@ impl Nomad {
             health: Health::new(Arc::clone(&client)),
             client,
             metrics: Vec::new(),
+            more: Vec::new(),
         })
+    }
+
+    /// Chain a later Directive of the same Server Block behind this one.
+    pub(crate) fn push(&mut self, later: Nomad) {
+        self.more.push(later);
     }
 
     pub(crate) fn register(&self, lifecycle: &mut pharos_server::Lifecycle) {
@@ -112,6 +121,9 @@ impl Nomad {
         registry: &pharos_server::metrics::Registry,
         listeners: &[pharos_server::ListenerKey],
     ) {
+        for later in &mut self.more {
+            later.set_metrics(registry, listeners);
+        }
         for listener in listeners {
             let address = listener.address;
             let server = if address.ip().is_unspecified() {
@@ -170,7 +182,13 @@ impl Plugin for Nomad {
         }
         len += 1;
         let wire = &wire[..len];
-        let Some((service, namespace)) = self.split(wire) else {
+        let Some((nomad, service, namespace)) =
+            std::iter::once(self).chain(&self.more).find_map(|nomad| {
+                nomad
+                    .split(wire)
+                    .map(|(service, namespace)| (nomad, service, namespace))
+            })
+        else {
             return next.run(cx).await;
         };
         let max = cx.max_response_size.max(512);
@@ -181,9 +199,9 @@ impl Plugin for Nomad {
                 return Outcome::Error(pharos_server::Error::ResponseBufferTooSmall);
             }
         }
-        let registrations = match self
+        let registrations = match nomad
             .client
-            .registrations(service, namespace, &self.filter)
+            .registrations(service, namespace, &nomad.filter)
             .await
         {
             Ok(registrations) => Some(registrations),
@@ -208,13 +226,13 @@ impl Plugin for Nomad {
             max_size: max,
             question,
             owner: wire,
-            ttl: self.ttl,
-            mailbox: &self.mailbox,
+            ttl: nomad.ttl,
+            mailbox: &nomad.mailbox,
         };
         match response::build(cx.response, &reply, registrations.as_deref()) {
             Ok(success) => {
                 // CoreDNS v1.15.0 plugin/nomad/nomad.go ServeDNS: the counters are labelled by the Query's namespace.
-                if let Some((_, metrics)) = self
+                if let Some((_, metrics)) = nomad
                     .metrics
                     .iter()
                     .find(|(address, _)| *address == cx.local)
@@ -232,7 +250,14 @@ impl Plugin for Nomad {
     }
 
     fn readiness(&self) -> Option<&dyn Readiness> {
-        Some(&*self.health)
+        Some(self)
+    }
+}
+
+// CoreDNS v1.15.0 plugin/nomad/ready.go Ready: each instance reports to `ready`, so the Server Block is ready when all of its Directives are.
+impl Readiness for Nomad {
+    fn ready(&self) -> bool {
+        self.health.ready() && self.more.iter().all(Readiness::ready)
     }
 }
 

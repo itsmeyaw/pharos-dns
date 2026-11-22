@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Type};
-use pharos_server::{Context, Error, Metadata, Next, Outcome, Plugin, Protocol, Transport};
+use pharos_server::{
+    Context, Error, Metadata, Next, Outcome, Plugin, Protocol, Readiness, Transport,
+};
 use tokio::net::TcpListener;
 
 use super::*;
@@ -12,6 +14,18 @@ struct NoNext;
 impl Next for NoNext {
     async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
         Outcome::Error(Error::NoNextPlugin)
+    }
+}
+
+/// A downstream Plugin whose Response Nomad never produces: REFUSED.
+struct Refuses;
+
+impl Next for Refuses {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let id = cx.query.id();
+        let builder = MessageBuilder::new(cx.response, 512, id, 0x8005).unwrap();
+        let _ = builder.finish();
+        Outcome::Response
     }
 }
 
@@ -75,6 +89,14 @@ fn query(name: &str, qtype: Type, qclass: Class) -> Vec<u8> {
 }
 
 async fn serve(nomad: &Nomad, wire: &[u8]) -> Result<Vec<u8>, Outcome> {
+    serve_with(nomad, wire, NoNext).await
+}
+
+async fn serve_with<N: Next + Send>(
+    nomad: &Nomad,
+    wire: &[u8],
+    next: N,
+) -> Result<Vec<u8>, Outcome> {
     let domain: Name = ".".parse().unwrap();
     let mut response = Vec::with_capacity(512);
     let mut slots = [];
@@ -89,7 +111,7 @@ async fn serve(nomad: &Nomad, wire: &[u8]) -> Result<Vec<u8>, Outcome> {
         response: &mut response,
         max_response_size: 512,
     };
-    match nomad.serve(&mut cx, NoNext).await {
+    match nomad.serve(&mut cx, next).await {
         Outcome::Response => Ok(response),
         other => Err(other),
     }
@@ -591,4 +613,80 @@ async fn a_failed_lookup_counts_as_failed() {
         counted(&registry).last().unwrap(),
         "pharos_nomad_failed_requests_total{namespace=\"default\",server=\"dns://127.0.0.1:53\"} 1"
     );
+}
+
+// RFC 1035 §6.2: a Query outside the zone belongs to the next Plugin, whose Response goes out unchanged.
+#[tokio::test]
+async fn a_query_that_is_not_ours_is_answered_by_the_next_plugin() {
+    let (nomad, stub) = plugin().await;
+    for (name, class) in [
+        ("www.example.org.", Class::IN),
+        ("service.nomad.", Class::IN),
+        ("example.service.nomad.", Class::IN),
+        ("example.default.service.nomad.", Class::CH),
+    ] {
+        let wire = serve_with(&nomad, &query(name, Type::A, class), Refuses)
+            .await
+            .unwrap();
+        assert_eq!(render(&wire).rcode, Rcode::REFUSED, "{name}");
+    }
+    assert!(stub.heads.lock().unwrap().is_empty());
+}
+
+// CoreDNS v1.15.0 plugin/nomad/setup.go setup: each Directive adds a Plugin to the chain; the first whose zone holds the name answers.
+#[tokio::test]
+async fn repeated_directives_chain_in_order() {
+    let (mut first, first_stub) = plugin().await;
+    let second_stub = Stub::default();
+    let address = second_stub
+        .tcp(|_| Canned::ok(r#"[{"Address":"10.0.0.2","Port":1}]"#))
+        .await;
+    first.push(
+        Nomad::new(
+            Settings {
+                zone: "other.nomad".to_owned(),
+                ..settings(vec![address.clone()])
+            },
+            &|_| None,
+        )
+        .unwrap(),
+    );
+    // A third Directive on the first zone never answers: the first one takes the name.
+    first.push(
+        Nomad::new(
+            Settings {
+                zone: "service.nomad".to_owned(),
+                ..settings(vec![address])
+            },
+            &|_| None,
+        )
+        .unwrap(),
+    );
+    let got = ask(&first, "example.default.service.nomad.", Type::A).await;
+    assert_eq!(
+        got.answer,
+        strings(&["example.default.service.nomad. 30 A 1.2.3.4"])
+    );
+    let got = ask(&first, "example.default.other.nomad.", Type::A).await;
+    assert_eq!(
+        got.answer,
+        strings(&["example.default.other.nomad. 30 A 10.0.0.2"])
+    );
+    assert_eq!(first_stub.heads.lock().unwrap().len(), 1);
+    assert_eq!(second_stub.heads.lock().unwrap().len(), 1);
+    let wire = query("example.default.elsewhere.", Type::A, Class::IN);
+    let wire = serve_with(&first, &wire, Refuses).await.unwrap();
+    assert_eq!(render(&wire).rcode, Rcode::REFUSED);
+}
+
+// CoreDNS v1.15.0 plugin/nomad/ready.go Ready: every Directive reports, and the Server Block is ready when all are.
+#[tokio::test]
+async fn readiness_needs_every_directive() {
+    let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = format!("http://{}", dead.local_addr().unwrap());
+    let (mut nomad, _) = plugin().await;
+    assert!(nomad.readiness().unwrap().ready());
+    // Two addresses are ready only once a probe succeeds, and none has run.
+    nomad.push(Nomad::new(settings(vec![address.clone(), address]), &|_| None).unwrap());
+    assert!(!nomad.readiness().unwrap().ready());
 }

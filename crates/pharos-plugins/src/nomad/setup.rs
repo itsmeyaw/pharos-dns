@@ -6,13 +6,20 @@ pub(crate) fn setup(
     cursor: &mut Cursor<'_>,
     block: &mut BlockContext<crate::Chain>,
 ) -> Result<(), Error> {
-    // CoreDNS v1.15.0 plugin/nomad/setup.go setup: each Directive builds one Plugin; `once` in build.rs keeps one per Server Block.
-    let settings = parse(cursor)?;
-    let nomad = Nomad::new(settings, &|name| std::env::var(name).ok())
-        .map_err(|message| cursor.error(message))?;
-    nomad.register(&mut block.config.lifecycle);
-    block.config.nomad = Some(nomad);
-    Ok(())
+    // CoreDNS v1.15.0 plugin/nomad/setup.go setup has no once-only check, but its `parse` reads one `c.Next()` and so drops later Directives; Pharos builds one chained instance per Directive.
+    loop {
+        let settings = parse(cursor)?;
+        let nomad = Nomad::new(settings, &|name| std::env::var(name).ok())
+            .map_err(|message| cursor.error(message))?;
+        nomad.register(&mut block.config.lifecycle);
+        match &mut block.config.nomad {
+            Some(first) => first.push(nomad),
+            none => *none = Some(nomad),
+        }
+        if !cursor.has_next() {
+            return Ok(());
+        }
+    }
 }
 
 // CoreDNS v1.15.0 plugin/nomad/setup.go parse.

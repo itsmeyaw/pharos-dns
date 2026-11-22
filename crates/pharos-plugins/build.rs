@@ -238,7 +238,6 @@ fn main() {
                 | "https3"
                 | "grpc"
                 | "etcd"
-                | "nomad"
                 | "proxyproto"
         );
         writeln!(

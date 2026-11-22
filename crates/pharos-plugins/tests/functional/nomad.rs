@@ -144,7 +144,17 @@ fn query(name: &str, qtype: Type) -> Vec<u8> {
     wire
 }
 
+// Setup reads `NOMAD_*` from the process environment, as the Go client does, and a test cannot clear it without `unsafe`; refuse to run where it would change what the tests see.
+fn assert_clean_environment() {
+    let set = std::env::vars()
+        .map(|(name, _)| name)
+        .filter(|name| name.starts_with("NOMAD_"))
+        .collect::<Vec<_>>();
+    assert!(set.is_empty(), "unset {set:?} to run the nomad tests");
+}
+
 fn build(corefile: &str) -> std::io::Result<(impl Handler, Registry, Lifecycle)> {
+    assert_clean_environment();
     let blocks = parse("Corefile", corefile).unwrap();
     let registry = Registry::new("test", "test", "test");
     let (mut servers, lifecycle) = servers_with_registry(
@@ -263,13 +273,32 @@ async fn a_corefile_with_every_property_builds_and_serves() {
     lifecycle.run(Phase::Shutdown).await.unwrap();
 }
 
+// A bare Directive would query the default address with whatever `NOMAD_TOKEN` holds, so it is only built, never asked.
+#[test]
+fn a_bare_nomad_directive_builds() {
+    build(".:0 {\n nomad\n}").unwrap();
+}
+
+// CoreDNS v1.15.0 plugin/nomad/setup.go setup: no once-only check, so each Directive adds a Plugin to the chain.
 #[tokio::test]
-async fn a_bare_nomad_directive_builds() {
-    let (server, _, lifecycle) = front(".:0 {\n nomad\n}");
-    // The default address (or `NOMAD_ADDR`) is used; whatever answers there, the Plugin answers too.
-    let seen = ask(&server, "example.default.service.nomad.", Type::A).await;
-    assert_eq!(seen.rcode, Rcode::NOERROR);
-    lifecycle.run(Phase::Shutdown).await.unwrap();
+async fn repeated_nomad_directives_each_serve_their_zone() {
+    let first = stub(nomad_api).await;
+    let second = stub(|_| Reply::ok(r#"[{"Address":"10.0.0.2","Port":1}]"#)).await;
+    let (server, _, _) = front(&format!(
+        ".:0 {{\n nomad corp.nomad {{\n  address {}\n }}\n nomad dev.nomad {{\n  address {}\n }}\n}}",
+        first.address, second.address
+    ));
+    let seen = ask(&server, "example.default.corp.nomad.", Type::A).await;
+    assert_eq!(
+        seen.answer,
+        strings(&["example.default.corp.nomad. 30 A 1.2.3.4"])
+    );
+    let seen = ask(&server, "example.default.dev.nomad.", Type::A).await;
+    assert_eq!(
+        seen.answer,
+        strings(&["example.default.dev.nomad. 30 A 10.0.0.2"])
+    );
+    assert_eq!((first.requests(), second.requests()), (1, 1));
 }
 
 // CoreDNS v1.15.0 plugin/nomad/setup_test.go TestSetup, through `configure`.
@@ -282,7 +311,6 @@ fn bad_nomad_directives_fail_the_build() {
         ".:0 {\n nomad {\n  address\n }\n}",
         ".:0 {\n nomad {\n  token a b\n }\n}",
         ".:0 {\n nomad {\n  address ftp://127.0.0.1\n }\n}",
-        ".:0 {\n nomad\n nomad\n}",
     ] {
         assert!(build(corefile).is_err(), "{corefile}");
     }
