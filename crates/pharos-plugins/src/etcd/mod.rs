@@ -1,8 +1,13 @@
 //! SkyDNS service discovery from etcd v3.
 
+pub mod client;
 pub mod msg;
 pub(crate) mod setup;
 mod ttl;
+
+#[cfg(test)]
+#[path = "../../tests/support/etcd_stub.rs"]
+mod etcd_stub;
 
 use std::sync::Arc;
 
