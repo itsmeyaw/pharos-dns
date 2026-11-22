@@ -16,7 +16,7 @@ use arc_swap::ArcSwapOption;
 use rustls::{
     DistinguishedName, NamedGroup, RootCertStore, ServerConfig, SignatureScheme,
     SupportedCipherSuite,
-    client::danger::HandshakeSignatureValid,
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     crypto::{
         CryptoProvider, WebPkiSupportedAlgorithms, aws_lc_rs, verify_tls12_signature,
         verify_tls13_signature,
@@ -442,6 +442,23 @@ pub fn client_config(options: &ClientOptions) -> io::Result<Arc<ClientConfig>> {
     Ok(Arc::new(config))
 }
 
+/// A client configuration that accepts any server certificate, like Go's `InsecureSkipVerify`;
+/// the handshake signature is still checked against the certificate's key.
+pub fn client_config_unverified() -> io::Result<Arc<ClientConfig>> {
+    let provider = provider();
+    let verifier = Arc::new(UnverifiedServerCert(
+        provider.signature_verification_algorithms,
+    ));
+    // RFC 9325 §3.1.1: TLS 1.2 is the oldest version in use.
+    let config = ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&TLS13, &TLS12])
+        .map_err(invalid)?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+    Ok(Arc::new(config))
+}
+
 /// A client configuration that trusts the system roots and every certificate in `extra`.
 // certmagic v0.25 ACMEIssuer.TrustedRoots: the system pool plus the extra bundle; an unreadable system pool is not fatal.
 pub fn client_config_with_roots(extra: Option<&Path>) -> io::Result<Arc<ClientConfig>> {
@@ -676,6 +693,45 @@ impl ClientCertVerifier for UnverifiedClientCert {
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.algorithms.supported_schemes()
+    }
+}
+
+/// Accepts whatever chain the server presents; only the handshake signature is checked.
+#[derive(Debug)]
+struct UnverifiedServerCert(WebPkiSupportedAlgorithms);
+
+impl ServerCertVerifier for UnverifiedServerCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls12_signature(message, cert, dss, &self.0)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_signature(message, cert, dss, &self.0)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.0.supported_schemes()
     }
 }
 
