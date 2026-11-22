@@ -266,7 +266,7 @@ fn raw_opt(wire: &[u8], pointer_budget: &mut usize) -> Option<u16> {
 }
 
 // RFC 5936 §2.2: AXFR errors end with one Response carrying the applicable RCODE.
-pub(crate) fn write_error(query: Message<'_>, response: &mut Vec<u8>, rcode: Rcode) {
+pub fn write_error(query: Message<'_>, response: &mut Vec<u8>, rcode: Rcode) {
     // RFC 1035 §4.1.1: QR marks a response; the opcode and RD are copied from the query.
     let flags = 0x8000
         | (query.flags() & 0x7800)

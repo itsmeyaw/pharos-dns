@@ -14,8 +14,8 @@ mod tests;
 
 use std::{cell::RefCell, time::SystemTime};
 
-use pharos_proto::{MessageBuilder, Opcode, Rcode};
-use pharos_server::{Context, Lifecycle, Next, Outcome, Phase, Plugin, Protocol};
+use pharos_proto::Rcode;
+use pharos_server::{Context, Lifecycle, Next, Outcome, Phase, Plugin, Protocol, write_error};
 use tokio::task::JoinSet;
 
 use self::msg::{Message, MessageType, SocketProtocol};
@@ -180,26 +180,6 @@ fn socket_protocol(protocol: Protocol) -> SocketProtocol {
         Protocol::Udp => SocketProtocol::Udp,
         Protocol::Tcp => SocketProtocol::Tcp,
     }
-}
-
-// Mirrors the Server's own error Response (pharos_server admission `write_error`), which is what the client receives.
-fn write_error(query: pharos_proto::Message<'_>, response: &mut Vec<u8>, rcode: Rcode) {
-    // RFC 1035 §4.1.1: QR marks a Response; the opcode and RD are copied from the Query.
-    let flags = 0x8000
-        | (query.flags() & 0x7800)
-        | if query.opcode() == Opcode::QUERY {
-            // RFC 4035 §3.2.2: copy the Query's CD bit into the Response.
-            query.flags() & 0x0110
-        } else {
-            0
-        }
-        | (rcode.0 & 15);
-    let mut builder = MessageBuilder::new(response, usize::from(u16::MAX), query.id(), flags)
-        .expect("valid maximum");
-    if let Some(question) = query.questions().next() {
-        let _ = builder.question(question.name, question.qtype, question.qclass);
-    }
-    let _ = builder.finish();
 }
 
 impl Plugin for Dnstap {
