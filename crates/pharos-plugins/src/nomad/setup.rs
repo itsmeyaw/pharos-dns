@@ -7,7 +7,10 @@ pub(crate) fn setup(
     block: &mut BlockContext<crate::Chain>,
 ) -> Result<(), Error> {
     // CoreDNS v1.15.0 plugin/nomad/setup.go setup: each Directive builds one Plugin; `once` in build.rs keeps one per Server Block.
-    block.config.nomad = Some(Nomad::new(parse(cursor)?));
+    let settings = parse(cursor)?;
+    let nomad = Nomad::new(settings, &|name| std::env::var(name).ok())
+        .map_err(|message| cursor.error(message))?;
+    block.config.nomad = Some(nomad);
     Ok(())
 }
 
