@@ -387,6 +387,10 @@ mod server {
     mod cases;
 }
 
+#[cfg(all(feature = "plugin-dnstap", feature = "plugin-whoami"))]
+#[path = "functional/dnstap.rs"]
+mod dnstap;
+
 #[path = "functional"]
 mod grpc {
     #[path = "grpc.rs"]
