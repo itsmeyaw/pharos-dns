@@ -53,6 +53,11 @@
 
 - [chaos Plugin notes](../crates/pharos-plugins/src/chaos/README.md)
 
+## clouddns
+
+- [clouddns Plugin notes](../crates/pharos-plugins/src/clouddns/README.md)
+- The managed-zone check and first load run at Startup, not at Corefile parse time; a failure still stops the server. A record set that does not parse, or lies outside its zone, is skipped with a warning where CoreDNS silently stops at it. A hosted zone that fails to refresh keeps its last good Zone, and the other hosted zones of the same name still refresh. `external_account` credentials with an `aws` or `executable` source are not supported.
+
 ## debug
 
 - [debug Plugin notes](../crates/pharos-plugins/src/debug/README.md)
