@@ -219,6 +219,7 @@
 - [route53 Plugin notes](../crates/pharos-plugins/src/route53/README.md)
 - RFC 1034 §4.2 / RFC 1035 §6.1: `route53` serves each hosted zone through the `file` Zone engine, so a hosted zone without an apex SOA and NS RRset fails setup (CoreDNS answers SERVFAIL), and record sets outside the ZONE are dropped with a warning (CoreDNS inserts but never serves them).
 - Alias record sets are skipped, as in CoreDNS v1.15.0, which reads only `ResourceRecords`.
+- RFC 1034 §3.6: non-IN QCLASS Queries pass to the next Plugin; CoreDNS does not gate QCLASS before its file lookup.
 
 ## siit
 
