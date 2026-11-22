@@ -36,15 +36,17 @@ fn requested(options: Options, client: Transport) -> Transport {
 
 /// Taps one exchange with `upstream`: always the Query, and the Response when `exchange` carries one in `reply`.
 ///
+/// `sent` is the Query as written to the Upstream, after any rewrite.
+///
 /// A failed exchange has no socket to report, so its transport is the one asked for and it has no query address.
-// CoreDNS v1.15.0 plugin/forward/dnstap.go toDnstap: the Response is tapped only when the reply is not nil.
+// CoreDNS v1.15.0 plugin/forward/dnstap.go toDnstap: the Query is `state.Req`, the Response is tapped only when the reply is not nil.
 pub(super) fn exchanged(
     taps: &[Tap],
     cx: &Context<'_, '_>,
     start: SystemTime,
     upstream: SocketAddr,
     exchange: Option<&Exchange>,
-    reply: &[u8],
+    (sent, reply): (&[u8], &[u8]),
     (options, client): (Options, Transport),
 ) {
     let protocol =
@@ -59,7 +61,7 @@ pub(super) fn exchanged(
         }
         query.set_response_address(upstream, protocol);
         if tap.include_raw() {
-            query.set_query_message(cx.query.as_wire());
+            query.set_query_message(sent);
         }
         tap.send_with(&query, cx);
 

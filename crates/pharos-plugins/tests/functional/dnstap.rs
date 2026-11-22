@@ -587,6 +587,38 @@ async fn forward_taps_its_exchange_with_the_upstream_from_the_servers_side() {
     assert_eq!(response.response_message.as_deref(), Some(&wire[..]));
 }
 
+// CoreDNS v1.15.0 plugin/forward/dnstap.go toDnstap: `state.Req` is the current, possibly rewritten, request.
+#[cfg(all(feature = "plugin-forward", feature = "plugin-rewrite"))]
+#[tokio::test]
+async fn forward_taps_the_query_it_sent_after_a_rewrite() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = socket(dir.path());
+    let listener = UnixListener::bind(&path).unwrap();
+    let upstream = echo_upstream().await;
+    let corefile = format!(
+        ".:0 {{\n dnstap {path} full\n rewrite name exact example.org example.net\n forward . 127.0.0.1:{upstream}\n}}"
+    );
+    let (server, _, _) = up(&corefile).await;
+    let mut collector = unix_collector(&listener).await;
+
+    ask(&server, "192.0.2.7:5353", Protocol::Udp).await;
+
+    let mut sent = None;
+    for _ in 0..4 {
+        let message = collector.next().await.message.unwrap();
+        match message.kind.unwrap() {
+            // The client's Query is tapped before the Plugin Chain rewrites it.
+            CLIENT_QUERY => assert_eq!(message.query_message.as_deref(), Some(&QUERY[..])),
+            FORWARDER_QUERY => sent = message.query_message,
+            _ => {}
+        }
+    }
+    let mut rewritten = QUERY.to_vec();
+    rewritten[13..20].copy_from_slice(b"example");
+    rewritten[21..24].copy_from_slice(b"net");
+    assert_eq!(sent.as_deref(), Some(&rewritten[..]));
+}
+
 // CoreDNS v1.15.0 plugin/forward/dnstap.go toDnstap: a failed exchange has no reply, so only the forwarder Query is tapped.
 #[cfg(feature = "plugin-forward")]
 #[tokio::test]

@@ -572,7 +572,7 @@ impl Plugin for Forward {
                         start,
                         proxy.address(),
                         exchange,
-                        wire,
+                        (query_wire, wire),
                         (options, protocol),
                     );
                 }
