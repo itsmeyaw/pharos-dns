@@ -1,5 +1,6 @@
 //! SkyDNS service discovery from etcd v3.
 
+pub mod msg;
 pub(crate) mod setup;
 mod ttl;
 
