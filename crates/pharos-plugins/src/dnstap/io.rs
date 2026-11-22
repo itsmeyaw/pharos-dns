@@ -101,8 +101,9 @@ pub(super) async fn run(tap: Tap, mut stopped: watch::Receiver<bool>) {
         tokio::select! {
             biased;
             _ = stopped.changed() => break,
-            () = queue.next_batch(&mut batch) => writer.write_batch(&mut batch).await,
+            // CoreDNS v1.15.0 plugin/dnstap/io.go dio.serve: the flush ticker is its own case; ahead of the queue so a never-empty queue cannot defer it.
             _ = flush.tick(), if writer.link.is_some() => writer.flush().await,
+            () = queue.next_batch(&mut batch) => writer.write_batch(&mut batch).await,
             _ = report.tick() => writer.tap.report_drops(),
             () = sleep_until(retry_at), if writer.link.is_none() => {}
         }
