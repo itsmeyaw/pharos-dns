@@ -108,6 +108,8 @@ mod message_len;
 pub mod minimal;
 #[cfg(feature = "plugin-multisocket")]
 pub mod multisocket;
+#[cfg(feature = "plugin-nomad")]
+pub mod nomad;
 #[cfg(feature = "plugin-nsid")]
 pub mod nsid;
 #[cfg(feature = "plugin-on")]
@@ -570,6 +572,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("loop", include_str!("loop/README.md")),
     ("minimal", include_str!("minimal/README.md")),
     ("multisocket", include_str!("multisocket/README.md")),
+    ("nomad", include_str!("nomad/README.md")),
     ("nsid", include_str!("nsid/README.md")),
     ("pprof", include_str!("pprof/README.md")),
     ("on", include_str!("on/README.md")),

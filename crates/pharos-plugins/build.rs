@@ -110,6 +110,7 @@ fn main() {
             "https3" => "https3::Https3",
             "grpc" => "grpc::Grpc",
             "clouddns" => "clouddns::CloudDns",
+            "nomad" => "nomad::Nomad",
             "quic" => "quic::Quic",
             "proxyproto" => "proxyproto::Proxyproto",
             "whoami" => "whoami::Whoami",
@@ -181,6 +182,7 @@ fn main() {
             "https3" => "https3::setup::setup",
             "grpc" => "grpc::setup::setup",
             "clouddns" => "clouddns::setup::setup",
+            "nomad" => "nomad::setup::setup",
             "quic" => "quic::setup::setup",
             "proxyproto" => "proxyproto::setup::setup",
             "whoami" => "whoami::setup::setup",
@@ -236,6 +238,7 @@ fn main() {
                 | "https3"
                 | "grpc"
                 | "etcd"
+                | "nomad"
                 | "proxyproto"
         );
         writeln!(

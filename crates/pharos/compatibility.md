@@ -201,6 +201,10 @@
 
 - [multisocket Plugin notes](../crates/pharos-plugins/src/multisocket/README.md)
 
+## nomad
+
+- [nomad Plugin notes](../crates/pharos-plugins/src/nomad/README.md)
+
 ## nsid
 
 - [nsid Plugin notes](../crates/pharos-plugins/src/nsid/README.md)
