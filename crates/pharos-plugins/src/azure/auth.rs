@@ -245,12 +245,12 @@ impl TokenSource {
         let response =
             response.map_err(|error| self.scrub(format!("token request failed: {error}")))?;
         // adal token.go refreshInternal: only 200 carries a token.
+        // The body is left out: an error page may echo the form with the secret percent-encoded, which `scrub` cannot match.
         if response.status != 200 {
-            return Err(self.scrub(format!(
-                "token endpoint returned status {}: {}",
-                response.status,
-                quote(&response.body)
-            )));
+            return Err(format!(
+                "token endpoint returned status {}",
+                response.status
+            ));
         }
         // adal token.go refreshInternal: the body is JSON with `access_token`, `expires_in` and `expires_on`.
         let json: Value = serde_json::from_slice(&response.body)

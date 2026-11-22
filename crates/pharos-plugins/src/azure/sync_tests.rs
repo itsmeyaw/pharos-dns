@@ -1008,6 +1008,32 @@ async fn secrets_and_tokens_never_appear_in_errors_or_logs() {
     assert!(texts[1].contains("<redacted>"), "{}", texts[1]);
 }
 
+// An AAD error body may echo the request form; its encoded secret differs from the literal one, so no auth body is quoted.
+#[tokio::test]
+async fn a_token_error_never_quotes_the_encoded_secret() {
+    let rig = rig(
+        Opts {
+            secret: "a/b+c=d",
+            ..Opts::default()
+        },
+        |request| {
+            is_token(request.path()).then(|| {
+                Reply::status(
+                    401,
+                    &format!("echo {} client_secret=a%2Fb%2Bc%3Dd", request.body),
+                )
+            })
+        },
+    )
+    .await;
+    let error = rig.update().await.unwrap_err();
+    let text = rig.azure.syncer.failure_message(error);
+    assert!(text.contains("status 401"), "{text}");
+    for leaked in ["a/b+c=d", "a%2Fb", "c%3Dd"] {
+        assert!(!text.contains(leaked), "{leaked} leaked: {text}");
+    }
+}
+
 async fn rig_with_token_then_api_errors() -> Rig {
     rig(Opts::default(), |request| {
         if is_token(request.path()) {
