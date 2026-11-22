@@ -498,6 +498,29 @@ fn nomad_namespace_cardinality_is_capped_per_server() {
     assert!(out.contains("namespace=\"fresh\",server=\"t\""));
 }
 
+// A Query namespace spelled like the overflow label must not give two series with identical labels.
+#[test]
+fn nomad_namespace_named_like_the_overflow_label_shares_its_series() {
+    let registry = super::Registry::new("test", "test", "test");
+    let metrics = registry.nomad("s");
+    metrics.failure(b"_other");
+    for index in 0..64 {
+        metrics.failure(format!("ns{index}").as_bytes());
+    }
+    metrics.failure(b"over");
+    metrics.failure(b"_other");
+    let mut out = String::new();
+    registry.encode(&mut out);
+    let others = out
+        .lines()
+        .filter(|line| line.contains("namespace=\"_other\""))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        others,
+        ["pharos_nomad_failed_requests_total{namespace=\"_other\",server=\"s\"} 3"]
+    );
+}
+
 #[test]
 fn nomad_counters_do_not_lose_concurrent_increments() {
     let registry = super::Registry::new("test", "test", "test");

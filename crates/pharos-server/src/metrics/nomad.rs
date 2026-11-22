@@ -120,6 +120,12 @@ impl NomadMetrics {
 
     fn count(&self, namespace: &[u8], counter: impl Fn(&Counts) -> &AtomicU64) {
         let series = &*self.0;
+        // Prometheus text exposition format: one series per name and label set, so a Query namespace spelled `_other` joins the overflow series.
+        if namespace == OVERFLOW.as_bytes() {
+            counter(&series.overflow).fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        // Deviation from CoreDNS v1.15.0 plugin/nomad/metrics.go: at most MAX_NAMESPACES labels per server bound memory; later ones count under OVERFLOW.
         let namespaces = series.namespaces.read().unwrap();
         if let Some(counts) = namespaces.get(namespace) {
             counter(counts).fetch_add(1, Ordering::Relaxed);
