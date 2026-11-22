@@ -105,11 +105,27 @@ impl Format {
         outcome: impl std::borrow::Borrow<Outcome>,
         elapsed: Duration,
     ) {
-        let response = self
-            .parts
-            .iter()
-            .any(|part| matches!(part, Part::Rcode | Part::Rsize | Part::Rflags))
-            .then(|| response(cx, outcome.borrow()));
+        self.write(output, cx, Some((outcome.borrow(), elapsed)));
+    }
+
+    /// Like `format` for a Query whose Response is not recorded: the Response and duration labels are `-`.
+    // CoreDNS v1.15.0 plugin/pkg/replacer/replacer.go: a nil recorder yields "-" for rcode, rsize, duration and rflags.
+    pub fn format_unrecorded(&self, output: &mut String, cx: &Context<'_, '_>) {
+        self.write(output, cx, None);
+    }
+
+    fn write(
+        &self,
+        output: &mut String,
+        cx: &Context<'_, '_>,
+        recorded: Option<(&Outcome, Duration)>,
+    ) {
+        let response = recorded.and_then(|(outcome, _)| {
+            self.parts
+                .iter()
+                .any(|part| matches!(part, Part::Rcode | Part::Rsize | Part::Rflags))
+                .then(|| response(cx, outcome))
+        });
         for part in &self.parts {
             match part {
                 Part::Literal(value) => output.push_str(value),
@@ -195,12 +211,18 @@ impl Format {
                         output.push('-');
                     }
                 }
-                Part::Rsize => {
-                    let _ = write!(output, "{}", response.map_or(0, |r| r.size));
-                }
-                Part::Duration => {
-                    let _ = write!(output, "{}s", elapsed.as_secs_f64());
-                }
+                Part::Rsize => match recorded {
+                    Some(_) => {
+                        let _ = write!(output, "{}", response.map_or(0, |r| r.size));
+                    }
+                    None => output.push('-'),
+                },
+                Part::Duration => match recorded {
+                    Some((_, elapsed)) => {
+                        let _ = write!(output, "{}s", elapsed.as_secs_f64());
+                    }
+                    None => output.push('-'),
+                },
                 Part::Rflags => {
                     if let Some(flags) = response.and_then(|r| r.flags) {
                         append_flags(output, flags);
