@@ -63,7 +63,7 @@
 ## dnstap
 
 - [dnstap Plugin notes](../crates/pharos-plugins/src/dnstap/README.md)
-- The default `version` is `Pharos-<crate version>`, not `CoreDNS-1.15.0`. After a lost connection Pharos redials with exponential backoff (100 ms to 10 s) and redials at once after a write error, where CoreDNS retries on a fixed 10 second tick. Pharos adds `pharos_dnstap_*` metrics, which CoreDNS has none of. Differential scenarios are skipped: a dnstap sink is not a DNS Response.
+- The default `version` is `Pharos-<crate version>`, not `CoreDNS-1.15.0`. Pharos redials a lost collector with exponential backoff, where CoreDNS retries on a fixed 10 second tick, and adds `pharos_dnstap_*` metrics.
 
 ## dynupdate
 
