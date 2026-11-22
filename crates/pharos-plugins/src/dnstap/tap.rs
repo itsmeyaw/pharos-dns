@@ -170,9 +170,9 @@ impl Tap {
     fn enqueue(&self, message: &Message<'_>, cx: Option<&Context<'_, '_>>) {
         let inner = &*self.0;
         // CoreDNS v1.15.0 plugin/dnstap/listener.go Dnstap: with no sink connected a broadcast reaches nobody, so skip the encoding.
-        // Pharos counts the skipped message as a drop, as a dialer without a connection does (io.go errNoOutput).
+        // Pharos counts the skipped message in the drop metric only: an idle listener is normal, so it must not trigger the periodic warning.
         if inner.config.role == Role::Listen && inner.sinks.load(Ordering::Relaxed) == 0 {
-            self.count_drop(DnstapDrop::NoConnection, 1);
+            self.metric(|metrics| metrics.dropped(DnstapDrop::NoConnection, 1));
             return;
         }
         let Some(mut buffer) = inner.queue.acquire() else {
