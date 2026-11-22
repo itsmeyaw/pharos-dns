@@ -48,6 +48,10 @@ mod k8s_external_coredns;
 #[path = "functional/erratic.rs"]
 mod erratic;
 
+#[cfg(feature = "plugin-nomad")]
+#[path = "functional/nomad.rs"]
+mod nomad;
+
 #[cfg(feature = "plugin-template")]
 #[path = "functional/template.rs"]
 mod template;
