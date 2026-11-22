@@ -4,7 +4,7 @@ use std::{fmt, net::IpAddr};
 
 use serde::{
     Deserialize, Deserializer,
-    de::{self, IgnoredAny, MapAccess, Visitor},
+    de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor},
 };
 
 /// The two fields of a Nomad API `ServiceRegistration` the Plugin uses.
@@ -16,12 +16,44 @@ pub(super) struct Registration {
     pub(super) port: u16,
 }
 
-/// Decode the reply body: a JSON array, or `null` for none.
-pub(super) fn decode(body: &[u8]) -> Result<Vec<Registration>, serde_json::Error> {
+/// Decode the reply body, a JSON array or `null` for none, onto the end of `out`.
+pub(super) fn decode_into(
+    body: &[u8],
+    out: &mut Vec<Registration>,
+) -> Result<(), serde_json::Error> {
     // Go encoding/json Decoder.Decode: the first JSON value is read and what follows it is ignored.
     let mut decoder = serde_json::Deserializer::from_slice(body);
+    Fill(out).deserialize(&mut decoder)
+}
+
+struct Fill<'a>(&'a mut Vec<Registration>);
+
+impl<'de> DeserializeSeed<'de> for Fill<'_> {
+    type Value = ();
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Fill<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an array of service registrations or null")
+    }
+
     // Go encoding/json: `null` decodes into a nil slice, which has no registrations.
-    Ok(Option::<Vec<Registration>>::deserialize(&mut decoder)?.unwrap_or_default())
+    fn visit_unit<E: de::Error>(self) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        while let Some(registration) = seq.next_element::<Registration>()? {
+            self.0.push(registration);
+        }
+        Ok(())
+    }
 }
 
 impl<'de> Deserialize<'de> for Registration {
@@ -148,6 +180,12 @@ impl<'de> Deserialize<'de> for Port {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decode(body: &[u8]) -> Result<Vec<Registration>, serde_json::Error> {
+        let mut out = Vec::new();
+        decode_into(body, &mut out)?;
+        Ok(out)
+    }
 
     fn registration(address: &str, port: u16) -> Registration {
         Registration {

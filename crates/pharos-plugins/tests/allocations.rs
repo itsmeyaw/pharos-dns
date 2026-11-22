@@ -197,6 +197,12 @@ mod grpc {
 }
 
 #[path = "allocations"]
+mod nomad {
+    #[path = "nomad_allocations.rs"]
+    mod nomad_allocations;
+}
+
+#[path = "allocations"]
 mod header {
     #[path = "header_allocations.rs"]
     mod header_allocations;

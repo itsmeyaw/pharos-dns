@@ -1,7 +1,7 @@
 //! The Nomad HTTP API client: `GET /v1/service/<name>` against one of several endpoints.
 
 use std::{
-    fmt, io,
+    fmt, io, mem,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -37,6 +37,14 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_IDLE: usize = 8;
 
 const TOKEN_HEADER: HeaderName = HeaderName::from_static("x-nomad-token");
+const USER_AGENT: HeaderValue =
+    HeaderValue::from_static(concat!("pharos/", env!("CARGO_PKG_VERSION")));
+
+// perf-book heap-allocations "Reusing Collections": buffers go back to a pool so a warm Query allocates none; one grown by a huge reply is freed instead of kept.
+const MAX_POOL: usize = 64;
+const MAX_KEPT_BODY: usize = 64 << 10;
+const MAX_KEPT_REGISTRATIONS: usize = 1024;
+const MAX_KEPT_TARGET: usize = 4 << 10;
 
 /// What a failed lookup says; it never contains the token or other credentials.
 #[derive(Debug)]
@@ -138,7 +146,7 @@ enum Transport {
 struct Endpoint {
     transport: Transport,
     /// The `Host` header: the address authority as written.
-    host: String,
+    host: HeaderValue,
     idle: Mutex<Vec<SendRequest<Empty<Bytes>>>>,
 }
 
@@ -151,7 +159,7 @@ impl Endpoint {
             }
             return Ok(Self::new(
                 Transport::Unix(path.into()),
-                "127.0.0.1".to_owned(),
+                HeaderValue::from_static("127.0.0.1"),
             ));
         }
         let (tls, rest) = if let Some(rest) = address.strip_prefix("https://") {
@@ -196,17 +204,19 @@ impl Endpoint {
         if host.is_empty() {
             return Err("an address needs a host".to_owned());
         }
+        // RFC 9110 §7.2: the Host field is the authority; it is checked once here, not on each request.
+        let header = HeaderValue::from_str(authority).map_err(|_| "invalid host")?;
         Ok(Self::new(
             Transport::Tcp {
                 host: host.to_owned(),
                 port,
                 tls,
             },
-            authority.to_owned(),
+            header,
         ))
     }
 
-    fn new(transport: Transport, host: String) -> Self {
+    fn new(transport: Transport, host: HeaderValue) -> Self {
         Self {
             transport,
             host,
@@ -214,6 +224,7 @@ impl Endpoint {
         }
     }
 
+    // RFC 9112 §9.3: a connection stays open for further requests until either side closes it; a sender that is no longer ready was closed.
     async fn take_idle(&self) -> Option<SendRequest<Empty<Bytes>>> {
         loop {
             let mut sender = self.idle.lock().unwrap().pop()?;
@@ -223,6 +234,7 @@ impl Endpoint {
         }
     }
 
+    // RFC 9112 §9.3: a finished exchange leaves the connection reusable, so park it (bounded by MAX_IDLE) unless the peer closed it.
     fn give_back(&self, sender: SendRequest<Empty<Bytes>>) {
         let mut idle = self.idle.lock().unwrap();
         if idle.len() < MAX_IDLE && !sender.is_closed() {
@@ -242,6 +254,73 @@ pub(super) struct Client {
     tls_server_name: Option<ServerName<'static>>,
     timeout: Duration,
     max_body: usize,
+    pool: Mutex<Vec<Scratch>>,
+}
+
+/// What one lookup builds and decodes into.
+#[derive(Default)]
+struct Scratch {
+    target: String,
+    body: Vec<u8>,
+    registrations: Vec<Registration>,
+}
+
+/// A [`Scratch`] taken from the pool of a [`Client`] and returned to it on drop, also when the lookup is cancelled.
+pub(super) struct Lease<'a> {
+    client: &'a Client,
+    scratch: Scratch,
+}
+
+impl Lease<'_> {
+    /// The registrations of one service. Endpoints are tried from the last good one onwards; the first to answer becomes the current one.
+    pub(super) async fn registrations(
+        &mut self,
+        service: &[u8],
+        namespace: &[u8],
+        filter: &str,
+    ) -> Result<&[Registration], Error> {
+        let client = self.client;
+        let scratch = &mut self.scratch;
+        client.target(&mut scratch.target, service, namespace, filter);
+        let start = client.current.load(Ordering::Relaxed);
+        let mut last = Error::Timeout;
+        for step in 0..client.endpoints.len() {
+            let index = (start + step) % client.endpoints.len();
+            let endpoint = &client.endpoints[index];
+            match client
+                .get(
+                    endpoint,
+                    &scratch.target,
+                    &mut scratch.body,
+                    &mut scratch.registrations,
+                )
+                .await
+            {
+                Ok(()) => {
+                    client.current.store(index, Ordering::Relaxed);
+                    return Ok(&scratch.registrations);
+                }
+                Err(error) => last = error,
+            }
+        }
+        Err(last)
+    }
+}
+
+impl Drop for Lease<'_> {
+    fn drop(&mut self) {
+        let scratch = mem::take(&mut self.scratch);
+        if scratch.target.capacity() <= MAX_KEPT_TARGET
+            && scratch.body.capacity() <= MAX_KEPT_BODY
+            && scratch.registrations.capacity() <= MAX_KEPT_REGISTRATIONS
+        {
+            let mut pool = self.client.pool.lock().unwrap();
+            // The pool is created with room for MAX_POOL, so this never reallocates.
+            if pool.len() < MAX_POOL {
+                pool.push(scratch);
+            }
+        }
+    }
 }
 
 // The token and password stay out of Debug output.
@@ -298,66 +377,64 @@ impl Client {
             tls_server_name,
             timeout: TIMEOUT,
             max_body: MAX_BODY,
+            pool: Mutex::new(Vec::with_capacity(MAX_POOL)),
         })
     }
 
-    /// The registrations of one service. Endpoints are tried from the last good one onwards; the first to answer becomes the current one.
-    pub(super) async fn registrations(
-        &self,
-        service: &[u8],
-        namespace: &[u8],
-        filter: &str,
-    ) -> Result<Vec<Registration>, Error> {
-        let target = self.target(service, namespace, filter);
-        let start = self.current.load(Ordering::Relaxed);
-        let mut last = Error::Timeout;
-        for step in 0..self.endpoints.len() {
-            let index = (start + step) % self.endpoints.len();
-            match self.get(&self.endpoints[index], &target).await {
-                Ok(registrations) => {
-                    self.current.store(index, Ordering::Relaxed);
-                    return Ok(registrations);
-                }
-                Err(error) => last = error,
-            }
+    pub(super) fn lease(&self) -> Lease<'_> {
+        Lease {
+            client: self,
+            scratch: self.pool.lock().unwrap().pop().unwrap_or_default(),
         }
-        Err(last)
     }
 
     // Hashicorp nomad api v1.10.5 api/services.go Get: `/v1/service/` + `url.PathEscape(name)`; params are `url.Values.Encode`d, so sorted by key.
-    fn target(&self, service: &[u8], namespace: &[u8], filter: &str) -> String {
-        let mut target = String::from("/v1/service/");
-        escape::path_segment(&mut target, service);
+    fn target(&self, target: &mut String, service: &[u8], namespace: &[u8], filter: &str) {
+        target.clear();
+        target.push_str("/v1/service/");
+        escape::path_segment(target, service);
         if !filter.is_empty() {
             target.push_str("?filter=");
-            escape::query_component(&mut target, filter.as_bytes());
+            escape::query_component(target, filter.as_bytes());
         }
         target.push(if filter.is_empty() { '?' } else { '&' });
         target.push_str("namespace=");
-        escape::query_component(&mut target, namespace);
+        escape::query_component(target, namespace);
         if let Some(region) = &self.region {
             target.push_str("&region=");
-            escape::query_component(&mut target, region.as_bytes());
+            escape::query_component(target, region.as_bytes());
         }
-        target
     }
 
-    async fn get(&self, endpoint: &Endpoint, target: &str) -> Result<Vec<Registration>, Error> {
-        let body = self.fetch(endpoint, target).await?;
-        registration::decode(&body).map_err(|error| Error::Decode {
+    async fn get(
+        &self,
+        endpoint: &Endpoint,
+        target: &str,
+        body: &mut Vec<u8>,
+        registrations: &mut Vec<Registration>,
+    ) -> Result<(), Error> {
+        self.fetch(endpoint, target, body).await?;
+        registrations.clear();
+        registration::decode_into(body, registrations).map_err(|error| Error::Decode {
             line: error.line(),
             column: error.column(),
         })
     }
 
-    async fn fetch(&self, endpoint: &Endpoint, target: &str) -> Result<Vec<u8>, Error> {
-        let (status, body) = timeout(self.timeout, self.exchange(endpoint, target))
+    /// Leave a 200 reply body in `body`.
+    async fn fetch(
+        &self,
+        endpoint: &Endpoint,
+        target: &str,
+        body: &mut Vec<u8>,
+    ) -> Result<(), Error> {
+        let status = timeout(self.timeout, self.exchange(endpoint, target, body))
             .await
             .map_err(|_| Error::Timeout)??;
         if status != 200 {
             return Err(Error::Status(status));
         }
-        Ok(body)
+        Ok(())
     }
 
     /// Whether any endpoint answers `/v1/agent/self`, trying them from the last good one onwards.
@@ -369,10 +446,11 @@ impl Client {
             escape::query_component(&mut target, region.as_bytes());
         }
         let start = self.current.load(Ordering::Relaxed);
+        let mut body = Vec::new();
         for step in 0..self.endpoints.len() {
             let index = (start + step) % self.endpoints.len();
-            let answered = match self.fetch(&self.endpoints[index], &target).await {
-                Ok(body) => serde_json::from_slice::<serde::de::IgnoredAny>(&body).is_ok(),
+            let answered = match self.fetch(&self.endpoints[index], &target, &mut body).await {
+                Ok(()) => serde_json::from_slice::<serde::de::IgnoredAny>(&body).is_ok(),
                 Err(_) => false,
             };
             if answered {
@@ -387,16 +465,21 @@ impl Client {
         self.endpoints.len()
     }
 
-    async fn exchange(&self, endpoint: &Endpoint, target: &str) -> Result<(u16, Vec<u8>), Error> {
-        // An idle connection may have been closed by the peer since it was parked; that fails before any reply, so try a fresh one once.
+    async fn exchange(
+        &self,
+        endpoint: &Endpoint,
+        target: &str,
+        body: &mut Vec<u8>,
+    ) -> Result<u16, Error> {
+        // RFC 9110 §9.2.2: GET is idempotent, so a request that failed on a connection the peer closed while it was parked may be retried once on a fresh one.
         if let Some(sender) = endpoint.take_idle().await {
-            match self.send(endpoint, sender, target).await {
+            match self.send(endpoint, sender, target, body).await {
                 Err(Error::Http(_) | Error::Io(_)) => {}
                 result => return result,
             }
         }
         let sender = self.connect(endpoint).await?;
-        self.send(endpoint, sender, target).await
+        self.send(endpoint, sender, target, body).await
     }
 
     async fn connect(&self, endpoint: &Endpoint) -> Result<SendRequest<Empty<Bytes>>, Error> {
@@ -423,13 +506,11 @@ impl Client {
         endpoint: &Endpoint,
         mut sender: SendRequest<Empty<Bytes>>,
         target: &str,
-    ) -> Result<(u16, Vec<u8>), Error> {
+        body: &mut Vec<u8>,
+    ) -> Result<u16, Error> {
         let mut request = Request::get(target)
-            .header(header::HOST, &endpoint.host)
-            .header(
-                header::USER_AGENT,
-                concat!("pharos/", env!("CARGO_PKG_VERSION")),
-            )
+            .header(header::HOST, endpoint.host.clone())
+            .header(header::USER_AGENT, USER_AGENT)
             .body(Empty::new())
             .map_err(|error| Error::Io(io::Error::other(error)))?;
         let headers = request.headers_mut();
@@ -441,7 +522,7 @@ impl Client {
         }
         let response = sender.send_request(request).await.map_err(Error::Http)?;
         let (parts, mut incoming) = response.into_parts();
-        let mut body = Vec::new();
+        body.clear();
         while let Some(frame) = incoming.frame().await {
             if let Ok(data) = frame.map_err(Error::Http)?.into_data() {
                 // Bound the reply against a hostile or broken endpoint.
@@ -452,7 +533,7 @@ impl Client {
             }
         }
         endpoint.give_back(sender);
-        Ok((parts.status.as_u16(), body))
+        Ok(parts.status.as_u16())
     }
 }
 

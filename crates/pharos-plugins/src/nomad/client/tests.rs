@@ -19,8 +19,10 @@ fn client(addresses: &[&str]) -> Client {
 
 async fn get(client: &Client, service: &str) -> Result<Vec<Registration>, Error> {
     client
+        .lease()
         .registrations(service.as_bytes(), b"default", "")
         .await
+        .map(<[Registration]>::to_vec)
 }
 
 fn get_port(address: &str) -> u16 {
@@ -43,6 +45,7 @@ async fn request_line_and_headers() {
     )
     .unwrap();
     client
+        .lease()
         .registrations(b"a b", b"ns/1", "Tags not contains x")
         .await
         .unwrap();
@@ -469,4 +472,22 @@ async fn no_error_text_contains_the_credentials() {
     for text in texts {
         assert!(!text.contains(SECRET), "{text}");
     }
+}
+
+// perf-book heap-allocations "Reusing Collections": a lookup's buffers go back to the pool, and a lease dropped mid-lookup returns its too.
+#[tokio::test]
+async fn leases_return_their_buffers_unless_a_reply_grew_them_too_far() {
+    let stub = Stub::default();
+    let address = stub.tcp(|_| Reply::ok(EXAMPLE)).await;
+    let client = client(&[&address]);
+    get(&client, "example").await.unwrap();
+    assert_eq!(client.pool.lock().unwrap().len(), 1);
+    let lease = client.lease();
+    assert!(client.pool.lock().unwrap().is_empty());
+    drop(lease);
+    assert_eq!(client.pool.lock().unwrap().len(), 1);
+    let mut huge = client.lease();
+    huge.scratch.body.reserve(MAX_KEPT_BODY + 1);
+    drop(huge);
+    assert_eq!(client.pool.lock().unwrap().len(), 0);
 }

@@ -199,11 +199,8 @@ impl Plugin for Nomad {
                 return Outcome::Error(pharos_server::Error::ResponseBufferTooSmall);
             }
         }
-        let registrations = match nomad
-            .client
-            .registrations(service, namespace, &nomad.filter)
-            .await
-        {
+        let mut lease = nomad.client.lease();
+        let registrations = match lease.registrations(service, namespace, &nomad.filter).await {
             Ok(registrations) => Some(registrations),
             Err(error) => {
                 // CoreDNS v1.15.0 plugin/nomad/nomad.go ServeDNS: a failed lookup is logged and answered empty.
@@ -229,7 +226,7 @@ impl Plugin for Nomad {
             ttl: nomad.ttl,
             mailbox: &nomad.mailbox,
         };
-        match response::build(cx.response, &reply, registrations.as_deref()) {
+        match response::build(cx.response, &reply, registrations) {
             Ok(success) => {
                 // CoreDNS v1.15.0 plugin/nomad/nomad.go ServeDNS: the counters are labelled by the Query's namespace.
                 if let Some((_, metrics)) = nomad
