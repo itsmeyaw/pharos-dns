@@ -25,6 +25,8 @@ fn migration_table_matches_all_registry_metric_families() {
     proxy.connection_cache("udp").miss();
     proxy.healthcheck_failure();
     registry.grpc("192.0.2.1:53").observe(0, 0.001);
+    registry.nomad("dns://:53").success(b"default");
+    registry.nomad("dns://:53").failure(b"default");
     registry.forward();
     registry.local();
     registry.enable_health_metrics();

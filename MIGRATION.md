@@ -101,6 +101,8 @@ The following table lists metric families, not individual histogram samples.
 | `pharos_kubernetes_rest_client_request_duration_seconds` | `coredns_kubernetes_rest_client_request_duration_seconds` |
 | `pharos_kubernetes_rest_client_requests_total` | `coredns_kubernetes_rest_client_requests_total` |
 | `pharos_local_localhost_requests_total` | `coredns_local_localhost_requests_total` |
+| `pharos_nomad_failed_requests_total` | `coredns_nomad_failed_requests_total` |
+| `pharos_nomad_success_requests_total` | `coredns_nomad_success_requests_total` |
 | `pharos_panics_total` | `coredns_panics_total` |
 | `pharos_plugin_enabled` | `coredns_plugin_enabled` |
 | `pharos_proxy_conn_cache_hits_total` | `coredns_proxy_conn_cache_hits_total` |

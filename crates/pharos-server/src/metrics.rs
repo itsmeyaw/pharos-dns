@@ -12,11 +12,13 @@ use std::{
 mod dnstap;
 mod grpc;
 mod kubernetes;
+mod nomad;
 mod template;
 mod trace;
 pub use dnstap::{DnstapDrop, DnstapMetrics};
 pub use grpc::GrpcMetrics;
 pub use kubernetes::{KubernetesMetrics, KubernetesRequestMetrics};
+pub use nomad::NomadMetrics;
 pub use template::{TemplateFailureMetrics, TemplateMetrics};
 pub use trace::TraceMetrics;
 
@@ -93,6 +95,7 @@ struct RegistryInner {
     grpc: grpc::GrpcRegistry,
     trace: Arc<trace::TraceCounters>,
     dnstap: dnstap::DnstapRegistry,
+    nomad: nomad::NomadRegistry,
 }
 
 #[derive(Default)]
@@ -657,6 +660,7 @@ impl Registry {
             grpc: grpc::GrpcRegistry::default(),
             trace: Arc::default(),
             dnstap: dnstap::DnstapRegistry::default(),
+            nomad: nomad::NomadRegistry::default(),
         }))
     }
 
@@ -817,6 +821,11 @@ impl Registry {
         self.0.dnstap.resolve()
     }
 
+    /// Resolve the request counters of the `nomad` Plugin for one Listener during setup.
+    pub fn nomad(&self, server: &str) -> NomadMetrics {
+        self.0.nomad.resolve(server)
+    }
+
     /// Register and share forward's unlabelled counters.
     pub fn forward(&self) -> ForwardMetrics {
         self.0.forward_enabled.store(true, Ordering::Relaxed);
@@ -880,6 +889,7 @@ impl Registry {
         self.0.grpc.encode(out);
         self.0.trace.encode(out);
         self.0.dnstap.encode(out);
+        self.0.nomad.encode(out);
         let shed = self.0.shed.lock().unwrap();
         if !shed.is_empty() {
             header(
