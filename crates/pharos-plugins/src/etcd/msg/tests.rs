@@ -369,3 +369,17 @@ fn from_json_accepts_limits() {
     assert_eq!(service.ttl, u32::MAX);
     assert_eq!(service.port, i64::MIN);
 }
+
+// The `_into` forms clear what the buffer held, so a pooled buffer gives the same result as a new one.
+#[test]
+fn into_forms_replace_the_buffer() {
+    let mut buffer = String::from("left over");
+    assert!(path_with_wildcard_into(&mut buffer, "a.*.local.", "skydns"));
+    assert_eq!(buffer, "/skydns/local");
+    assert!(!path_with_wildcard_into(&mut buffer, "a.local.", "skydns"));
+    assert_eq!(buffer, "/skydns/local/a");
+    domain_into(&mut buffer, "/skydns/local/cluster/service/");
+    assert_eq!(buffer, "service.cluster.local.");
+    domain_into(&mut buffer, "/skydns");
+    assert_eq!(buffer, ".");
+}

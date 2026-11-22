@@ -8,7 +8,6 @@ use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use pharos_proto::{BuildError, Class, Message, MessageBuilder, Name, Section, Type};
@@ -17,14 +16,15 @@ use pharos_server::Context;
 use super::{
     Etcd,
     msg::{self, HostType, Service},
-    view::{Error as ViewError, Record},
+    scratch,
+    view::{CachedRecords, Error as ViewError, Record},
 };
 
 /// CoreDNS v1.15.0 plugin/backend_lookup.go `maxCnameChainLength`.
 const MAX_CNAME_CHAIN_LENGTH: usize = 10;
 
-/// CoreDNS v1.15.0 plugin/etcd/xfr.go `MinTTL`: the SOA minimum, and with 300 the cap of the SOA TTL.
-const SOA_MINIMUM: u32 = 30;
+/// The octets `apex.dns` adds to the wire form of the zone name.
+const APEX_WIRE_LEN: usize = 9;
 
 /// Why a lookup found nothing to answer with.
 #[derive(Debug, Eq, PartialEq)]
@@ -63,11 +63,6 @@ pub(super) enum Data {
         weight: u16,
         port: u16,
         target: Name,
-    },
-    Soa {
-        mname: Name,
-        rname: Name,
-        serial: u32,
     },
     /// The `index`th answer of a Response to a Self Lookup.
     Foreign {
@@ -144,19 +139,6 @@ impl Rr {
                 w.write_bytes(&port.to_be_bytes())?;
                 w.write_uncompressed_name(target.as_name_ref())
             }),
-            // RFC 1035 §3.3.13: SOA RDATA; CoreDNS v1.15.0 plugin/backend_lookup.go SOA sets the timers.
-            Data::Soa {
-                mname,
-                rname,
-                serial,
-            } => builder.record_with(section, owner, Type::SOA, class, ttl, |w| {
-                w.write_name(mname.as_name_ref())?;
-                w.write_name(rname.as_name_ref())?;
-                for number in [*serial, 7200, 1800, 86400, SOA_MINIMUM] {
-                    w.write_bytes(&number.to_be_bytes())?;
-                }
-                Ok(())
-            }),
             Data::Foreign {
                 wire,
                 index,
@@ -217,19 +199,100 @@ struct Foreign {
     truncated: bool,
 }
 
+/// The services at one name that a lookup works with, borrowed from the view.
+///
+/// CoreDNS v1.15.0 plugin/etcd/etcd.go `Services`: what etcd holds at the name, of one group.
+pub(super) struct Services {
+    found: Arc<CachedRecords>,
+    qtype: Type,
+    /// The key path of a name with a wildcard, which the keys found must match.
+    // shortcut: a wildcard name allocates its path on each Query; wildcard Queries are rare, borrow it from a pooled buffer if they get hot.
+    wildcard: Option<Box<str>>,
+    /// The group the services are cut to; allocated only for services that have a group.
+    group: Option<Box<str>>,
+}
+
+impl Services {
+    fn new(found: Arc<CachedRecords>, qtype: Type, wildcard: Option<Box<str>>) -> Found<Self> {
+        let mut services = Self {
+            found,
+            qtype,
+            wildcard,
+            group: None,
+        };
+        // CoreDNS v1.15.0 plugin/etcd/etcd.go `loopNodes`: a value that is not a service fails the lookup.
+        if services.found.records.iter().any(|record| {
+            matches!(record, Record::Invalid { .. }) && services.key_matches(record.key())
+        }) {
+            return Err(Failure::Other);
+        }
+        // CoreDNS v1.15.0 plugin/etcd/msg/service.go `Group`: keep one group of the services.
+        services.group = msg::chosen_group(services.matching()).map(Box::from);
+        Ok(services)
+    }
+
+    /// CoreDNS v1.15.0 plugin/etcd/etcd.go `loopNodes`: a wildcard name keeps the keys it matches.
+    fn key_matches(&self, key: &str) -> bool {
+        self.wildcard
+            .as_deref()
+            .is_none_or(|full| wildcard_matches(key, full))
+    }
+
+    /// The services before the group is chosen.
+    fn matching(&self) -> impl Iterator<Item = &Service> + Clone {
+        self.found.records.iter().filter_map(|record| match record {
+            Record::Service(service)
+                if self.key_matches(&service.key) && should_include(service, self.qtype) =>
+            {
+                Some(service)
+            }
+            _ => None,
+        })
+    }
+
+    /// The services of the lookup, in key order.
+    pub(super) fn iter(&self) -> impl Iterator<Item = &Service> + Clone {
+        let group = self.group.as_deref();
+        self.matching()
+            .filter(move |s| group.is_none_or(|g| s.group.is_empty() || s.group == g))
+    }
+}
+
 /// One lookup of the `etcd` Plugin in `zone`.
 pub(super) struct Lookup<'a, 'q, 'c> {
     pub etcd: &'a Etcd,
     pub cx: &'a Context<'q, 'c>,
     pub zone: &'a Name,
     /// `zone` lowercased.
-    pub zone_key: String,
+    pub zone_key: &'a str,
 }
 
 impl Lookup<'_, '_, '_> {
-    /// CoreDNS v1.15.0 plugin/etcd/handler.go `ServeDNS`: the lookup for the type asked.
-    pub(super) async fn answer(&self, q: &Query) -> Found<Answer> {
+    /// CoreDNS v1.15.0 plugin/etcd/handler.go `ServeDNS`: the etcd read that starts the lookup for the
+    /// type asked at `key`, the name lowercased. `None` when the lookup starts without one.
+    pub(super) async fn first(&self, key: &str, qtype: Type) -> Found<Option<Services>> {
+        match qtype {
+            Type::SOA => Ok(None),
+            // CoreDNS v1.15.0 plugin/etcd/handler.go: NS is answered at the zone apex only.
+            Type::NS if key == self.zone_key => Ok(None),
+            Type::TXT | Type::MX | Type::SRV => self.services_at(key, qtype, false).await.map(Some),
+            Type::CNAME | Type::PTR => self.services_at(key, qtype, true).await.map(Some),
+            // CoreDNS v1.15.0 plugin/etcd/handler.go: a fake A lookup tells NODATA from NXDOMAIN.
+            _ => self.apex_services(key, qtype).await.map(Some),
+        }
+    }
+
+    /// CoreDNS v1.15.0 plugin/etcd/handler.go `ServeDNS`: the lookup for the type asked, given what
+    /// [`Self::first`] read.
+    pub(super) async fn answer(&self, q: &Query, first: Option<Services>) -> Found<Answer> {
         let mut answer = Answer::default();
+        let Some(services) = first else {
+            // Only NS at the zone apex starts without services; SOA is written without a lookup.
+            if q.qtype == Type::NS {
+                (answer.records, answer.extra) = self.ns(q).await?;
+            }
+            return Ok(answer);
+        };
         match q.qtype {
             Type::A | Type::AAAA | Type::TXT => {
                 let kind = match q.qtype {
@@ -237,92 +300,60 @@ impl Lookup<'_, '_, '_> {
                     Type::AAAA => Kind::Aaaa,
                     _ => Kind::Txt,
                 };
-                (answer.records, answer.truncated) = self.address(kind, q, &[]).await?;
+                (answer.records, answer.truncated) =
+                    self.address(kind, q, &[], Some(services)).await?;
             }
-            Type::CNAME => answer.records = self.cname(q).await?,
-            Type::PTR => answer.records = self.ptr(q).await?,
-            Type::MX => (answer.records, answer.extra) = self.mx(q).await?,
-            Type::SRV => (answer.records, answer.extra) = self.srv(q).await?,
-            Type::SOA => answer.records = self.soa().into_iter().collect(),
-            // CoreDNS v1.15.0 plugin/etcd/handler.go: NS is answered at the zone apex only.
-            Type::NS if q.key == self.zone_key => {
-                (answer.records, answer.extra) = self.ns(q).await?;
-            }
-            // CoreDNS v1.15.0 plugin/etcd/handler.go: a fake A lookup tells NODATA from NXDOMAIN.
+            Type::CNAME => answer.records = self.cname(q, &services),
+            Type::PTR => answer.records = self.ptr(q, &services),
+            Type::MX => (answer.records, answer.extra) = self.mx(q, &services).await,
+            Type::SRV => (answer.records, answer.extra) = self.srv(q, &services).await,
             _ => {
-                self.address(Kind::A, q, &[]).await?;
+                self.address(Kind::A, q, &[], Some(services)).await?;
             }
         }
         Ok(answer)
     }
 
-    /// CoreDNS v1.15.0 plugin/backend_lookup.go `SOA`.
-    pub(super) fn soa(&self) -> Option<Rr> {
-        let serial = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs() as u32);
-        Some(Rr::new(
-            self.zone,
-            SOA_MINIMUM.min(300),
-            Data::Soa {
-                mname: Name::parse("ns.dns", self.zone).ok()?,
-                rname: Name::parse("hostmaster", self.zone).ok()?,
-                serial,
-            },
-        ))
-    }
-
     /// CoreDNS v1.15.0 plugin/etcd/etcd.go `Services`: what etcd holds at the name, of one group.
-    async fn services(&self, q: &Query, exact: bool) -> Found<Vec<Service>> {
+    async fn services_at(&self, key: &str, qtype: Type, exact: bool) -> Found<Services> {
         let prefix = &self.etcd.config.path_prefix;
-        let (path, star) = msg::path_with_wildcard(&q.key, prefix);
+        let mut path = scratch::lease();
+        let star = msg::path_with_wildcard_into(&mut path, key, prefix);
         // CoreDNS v1.15.0 plugin/etcd/etcd.go `Records`: a read error is NXDOMAIN only when no key is found.
         let found = match self.etcd.view.get(&path, !exact).await {
             Ok(found) => found,
             Err(ViewError::KeyNotFound) => return Err(Failure::NameError),
             Err(ViewError::Client(_)) => return Err(Failure::Other),
         };
-        let full = msg::path(&q.key, prefix);
-        let mut kept = Vec::with_capacity(found.records.len());
-        for record in &found.records {
-            // CoreDNS v1.15.0 plugin/etcd/etcd.go `loopNodes`: a wildcard name keeps the keys it matches.
-            if star && !wildcard_matches(record.key(), &full) {
-                continue;
-            }
-            // CoreDNS v1.15.0 plugin/etcd/etcd.go `loopNodes`: a value that is not a service fails the lookup.
-            let Record::Service(service) = record else {
-                return Err(Failure::Other);
-            };
-            if should_include(service, q.qtype) {
-                kept.push(service);
-            }
-        }
-        // CoreDNS v1.15.0 plugin/etcd/msg/service.go `Group`: keep one group of the services.
-        let group = msg::chosen_group(kept.iter().copied());
-        Ok(kept
-            .into_iter()
-            .filter(|s| group.is_none_or(|g| s.group.is_empty() || s.group == g))
-            .cloned()
-            .collect())
+        let wildcard = star.then(|| msg::path(key, prefix).into_boxed_str());
+        Services::new(found, qtype, wildcard)
     }
 
-    /// A Query for `prefix` under the zone, like the fake names of CoreDNS `NS` and `checkForApex`.
+    /// A Query for `prefix` under the zone, like the fake names of CoreDNS `NS`.
     fn under_zone(&self, q: &Query, prefix: &str) -> Found<Query> {
         let owner = Name::parse(prefix, self.zone).map_err(|_| Failure::Other)?;
         Ok(Query::new(owner, q.qtype))
     }
 
     /// CoreDNS v1.15.0 plugin/backend_lookup.go `checkForApex`.
-    async fn apex_services(&self, q: &Query) -> Found<Vec<Service>> {
-        if q.key != self.zone_key {
-            return self.services(q, false).await;
+    async fn apex_services(&self, key: &str, qtype: Type) -> Found<Services> {
+        if key != self.zone_key {
+            return self.services_at(key, qtype, false).await;
+        }
+        // RFC 1035 §2.3.4: a name is at most 255 octets, so the zone must leave room for `apex.dns`.
+        if self.zone.as_wire().len() + APEX_WIRE_LEN > 255 {
+            return Err(Failure::Other);
         }
         // The zone name itself is answered from the special `apex.dns` entry.
-        let apex = self.under_zone(q, "apex.dns")?;
-        match self.services(&apex, false).await {
+        let mut apex = scratch::lease();
+        apex.push_str("apex.dns.");
+        if self.zone_key != "." {
+            apex.push_str(self.zone_key);
+        }
+        match self.services_at(&apex, qtype, false).await {
             // Without `no_apex_fallback` the entries under the zone name serve when `apex.dns` is absent.
             Err(Failure::NameError) if !self.etcd.config.no_apex_fallback => {
-                self.services(q, false).await
+                self.services_at(key, qtype, false).await
             }
             other => other,
         }
@@ -331,16 +362,23 @@ impl Lookup<'_, '_, '_> {
     /// The A, AAAA or TXT records at `q`, with the CNAMEs chased to them, and whether one is truncated.
     ///
     /// CoreDNS v1.15.0 plugin/backend_lookup.go `A`, `AAAA` and `TXT`, which differ in what they keep.
-    /// `previous` holds the targets of the CNAMEs followed so far.
-    async fn address(&self, kind: Kind, q: &Query, previous: &[Name]) -> Found<(Vec<Rr>, bool)> {
-        let services = if kind == Kind::Txt {
-            self.services(q, false).await?
-        } else {
-            self.apex_services(q).await?
+    /// `previous` holds the targets of the CNAMEs followed so far; `preloaded` the services at `q`
+    /// when they were read already.
+    async fn address(
+        &self,
+        kind: Kind,
+        q: &Query,
+        previous: &[Name],
+        preloaded: Option<Services>,
+    ) -> Found<(Vec<Rr>, bool)> {
+        let services = match preloaded {
+            Some(services) => services,
+            None if kind == Kind::Txt => self.services_at(&q.key, q.qtype, false).await?,
+            None => self.apex_services(&q.key, q.qtype).await?,
         };
         let (mut records, mut truncated) = (Vec::new(), false);
         let mut dup = HashSet::new();
-        for service in &services {
+        for service in services.iter() {
             match (service.host_type(), kind) {
                 (HostType::Cname, _) => {
                     let Some(target) = fqdn_name(&service.host) else {
@@ -359,7 +397,9 @@ impl Lookup<'_, '_, '_> {
                         // CoreDNS v1.15.0 plugin/backend_lookup.go: a target in the zone is looked up here.
                         let next = Query::new(target.clone(), q.qtype);
                         let chain = [previous, std::slice::from_ref(&target)].concat();
-                        if let Ok((found, tc)) = Box::pin(self.address(kind, &next, &chain)).await {
+                        if let Ok((found, tc)) =
+                            Box::pin(self.address(kind, &next, &chain, None)).await
+                        {
                             truncated |= tc;
                             if !found.is_empty() {
                                 records.push(cname);
@@ -399,26 +439,25 @@ impl Lookup<'_, '_, '_> {
     }
 
     /// CoreDNS v1.15.0 plugin/backend_lookup.go `CNAME`.
-    async fn cname(&self, q: &Query) -> Found<Vec<Rr>> {
-        let services = self.services(q, true).await?;
+    fn cname(&self, q: &Query, services: &Services) -> Vec<Rr> {
         // Only the first service answers, and only when its host is a name.
-        Ok(services
-            .first()
+        services
+            .iter()
+            .next()
             .filter(|service| service.host.parse::<IpAddr>().is_err())
             .and_then(|service| {
                 let target = fqdn_name(&service.host)?;
                 Some(Rr::new(&q.owner, service.ttl, Data::Cname(target)))
             })
             .into_iter()
-            .collect())
+            .collect()
     }
 
     /// CoreDNS v1.15.0 plugin/backend_lookup.go `PTR`: services whose host is a name.
-    async fn ptr(&self, q: &Query) -> Found<Vec<Rr>> {
-        let services = self.services(q, true).await?;
+    fn ptr(&self, q: &Query, services: &Services) -> Vec<Rr> {
         let mut dup = HashSet::new();
         let mut records = Vec::new();
-        for service in &services {
+        for service in services.iter() {
             if service.host.parse::<IpAddr>().is_err()
                 && dup.insert(service.host.as_str())
                 && let Some(target) = fqdn_name(&service.host)
@@ -426,23 +465,23 @@ impl Lookup<'_, '_, '_> {
                 records.push(Rr::new(&q.owner, service.ttl, Data::Ptr(target)));
             }
         }
-        Ok(records)
+        records
     }
 
     /// CoreDNS v1.15.0 plugin/backend_lookup.go `NS`: the nameservers live at `ns.dns.ZONE`.
     async fn ns(&self, q: &Query) -> Found<(Vec<Rr>, Vec<Rr>)> {
         let fake = self.under_zone(q, "ns.dns")?;
-        let services = self.services(&fake, false).await?;
+        let services = self.services_at(&fake.key, q.qtype, false).await?;
         let (mut records, mut extra) = (Vec::new(), Vec::new());
         let mut seen = HashSet::new();
-        for mut service in services {
+        for service in services.iter() {
             let host_type = service.host_type();
             match host_type {
                 // CoreDNS v1.15.0 plugin/backend_lookup.go `NS`: a nameserver is an address, not a name.
                 HostType::Cname => return Err(Failure::Other),
                 HostType::A(_) | HostType::Aaaa(_) => {
-                    service.host = msg::domain(&service.key);
-                    let Some(ns) = target_name(&service) else {
+                    let Some(ns) = target_name(&msg::domain(&service.key), service.target_strip)
+                    else {
                         continue;
                     };
                     extra.extend(address_rr(&ns, service.ttl, host_type));
@@ -457,108 +496,93 @@ impl Lookup<'_, '_, '_> {
     }
 
     /// CoreDNS v1.15.0 plugin/backend_lookup.go `MX`.
-    async fn mx(&self, q: &Query) -> Found<(Vec<Rr>, Vec<Rr>)> {
-        let services = self.services(q, false).await?;
+    async fn mx(&self, q: &Query, services: &Services) -> (Vec<Rr>, Vec<Rr>) {
         let (mut records, mut extra) = (Vec::new(), Vec::new());
         let mut dup = HashSet::new();
         let mut looked_up = HashSet::new();
-        for mut service in services {
+        for service in services.iter() {
             if !service.mail {
                 continue;
             }
             let host_type = service.host_type();
             match host_type {
                 HostType::Cname => {
-                    let Some(exchange) = target_name(&service) else {
+                    let Some(exchange) = target_name(&service.host, service.target_strip) else {
                         continue;
                     };
-                    records.push(mx_rr(q, &service, exchange.clone()));
+                    records.push(mx_rr(q, service, exchange.clone()));
                     if looked_up.insert(exchange.clone()) {
                         extra.extend(self.addresses(&exchange).await);
                     }
                 }
                 HostType::A(_) | HostType::Aaaa(_) => {
-                    let host = service.host.clone();
-                    service.host = msg::domain(&service.key);
-                    let Some(exchange) = target_name(&service) else {
+                    let domain = msg::domain(&service.key);
+                    let Some(exchange) = target_name(&domain, service.target_strip) else {
                         continue;
                     };
-                    let Some(owner) = fqdn_name(&service.host) else {
+                    let Some(owner) = fqdn_name(&domain) else {
                         continue;
                     };
                     if dup.insert((exchange.clone(), service.priority as u16, String::new())) {
-                        records.push(mx_rr(q, &service, exchange));
+                        records.push(mx_rr(q, service, exchange));
                     }
                     // CoreDNS v1.15.0 plugin/backend_lookup.go `MX`: the address is named by the key, without the strip.
-                    if dup.insert((owner.clone(), 0, host)) {
+                    if dup.insert((owner.clone(), 0, service.host.clone())) {
                         extra.extend(address_rr(&owner, service.ttl, host_type));
                     }
                 }
                 HostType::Txt => {}
             }
         }
-        Ok((records, extra))
+        (records, extra)
     }
 
     /// CoreDNS v1.15.0 plugin/backend_lookup.go `SRV`.
-    async fn srv(&self, q: &Query) -> Found<(Vec<Rr>, Vec<Rr>)> {
-        let services = self.services(q, false).await?;
+    async fn srv(&self, q: &Query, services: &Services) -> (Vec<Rr>, Vec<Rr>) {
         // Two passes: the weight of a service is its share of the weights at its priority.
         let mut totals: HashMap<i64, i64> = HashMap::new();
-        for service in &services {
-            let weight = if service.weight == 0 {
-                100
-            } else {
-                service.weight
-            };
+        for service in services.iter() {
             let total = totals.entry(service.priority).or_default();
-            *total = total.wrapping_add(weight);
+            *total = total.wrapping_add(srv_weight(service));
         }
         let (mut records, mut extra) = (Vec::new(), Vec::new());
         let mut dup = HashSet::new();
         let mut looked_up = HashSet::new();
-        for mut service in services {
+        for service in services.iter() {
             // CoreDNS v1.15.0 plugin/backend_lookup.go `SRV`: port -1 marks a service without a port.
             if service.port == -1 {
                 continue;
             }
-            let share = 100.0 / totals[&service.priority] as f64;
-            let share = if service.weight == 0 {
-                share * 100.0
-            } else {
-                share * service.weight as f64
-            };
-            // RFC 2782: a weight of zero is for a lone target; CoreDNS keeps it at least 1.
-            let weight = (share.floor() as u16).max(1);
+            let weight = srv_share(service, totals[&service.priority]);
             let host_type = service.host_type();
             match host_type {
                 HostType::Cname => {
-                    let Some(target) = target_name(&service) else {
+                    let Some(target) = target_name(&service.host, service.target_strip) else {
                         continue;
                     };
-                    records.push(srv_rr(q, &service, weight, target.clone()));
+                    records.push(srv_rr(q, service, weight, target.clone()));
                     if looked_up.insert(target.clone()) {
                         extra.extend(self.addresses(&target).await);
                     }
                 }
                 HostType::A(_) | HostType::Aaaa(_) => {
-                    let host = service.host.clone();
-                    service.host = msg::domain(&service.key);
-                    let Some(target) = target_name(&service) else {
+                    let Some(target) =
+                        target_name(&msg::domain(&service.key), service.target_strip)
+                    else {
                         continue;
                     };
                     let port = service.port as u16;
                     if dup.insert((target.clone(), port, String::new())) {
-                        records.push(srv_rr(q, &service, weight, target.clone()));
+                        records.push(srv_rr(q, service, weight, target.clone()));
                     }
-                    if dup.insert((target.clone(), 0, host)) {
+                    if dup.insert((target.clone(), 0, service.host.clone())) {
                         extra.extend(address_rr(&target, service.ttl, host_type));
                     }
                 }
                 HostType::Txt => {}
             }
         }
-        Ok((records, extra))
+        (records, extra)
     }
 
     /// The addresses of the target of an SRV or MX record, for the Additional section.
@@ -577,7 +601,7 @@ impl Lookup<'_, '_, '_> {
         }
         // CoreDNS v1.15.0 plugin/backend_lookup.go `SRV`: a target in the zone has A records here.
         let query = Query::new(target.clone(), Type::A);
-        match self.address(Kind::A, &query, &[]).await {
+        match self.address(Kind::A, &query, &[], None).await {
             Ok((found, _)) => found,
             Err(_) => Vec::new(),
         }
@@ -636,15 +660,36 @@ fn fqdn(host: &str) -> Cow<'_, str> {
 }
 
 /// CoreDNS v1.15.0 plugin/etcd/msg/service.go `NewSRV`: the host, with `targetstrip` labels cut off.
-fn target_name(service: &Service) -> Option<Name> {
-    let host = fqdn(&service.host);
+fn target_name(host: &str, target_strip: i64) -> Option<Name> {
+    let host = fqdn(host);
     // CoreDNS v1.15.0 plugin/etcd/msg/service.go `NewSRV`: strip only when `targetstrip` is positive.
-    let host = if service.target_strip > 0 {
-        msg::target_strip(&host, service.target_strip)
+    let host = if target_strip > 0 {
+        msg::target_strip(&host, target_strip)
     } else {
         &host
     };
     host.parse().ok()
+}
+
+/// CoreDNS v1.15.0 plugin/backend_lookup.go `SRV`: a service that sets no weight counts for 100.
+pub(super) fn srv_weight(service: &Service) -> i64 {
+    if service.weight == 0 {
+        100
+    } else {
+        service.weight
+    }
+}
+
+/// CoreDNS v1.15.0 plugin/backend_lookup.go `SRV`: the weight of a service among those of its
+/// priority, which weigh `total` together; RFC 2782 wants a lone target at 0, CoreDNS keeps it at least 1.
+pub(super) fn srv_share(service: &Service, total: i64) -> u16 {
+    let share = 100.0 / total as f64;
+    let share = if service.weight == 0 {
+        share * 100.0
+    } else {
+        share * service.weight as f64
+    };
+    (share.floor() as u16).max(1)
 }
 
 /// RFC 1035 §3.3.14: the text in character-strings of at most 255 octets.

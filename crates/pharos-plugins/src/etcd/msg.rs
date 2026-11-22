@@ -305,7 +305,9 @@ fn count_slashes(key: &str) -> usize {
 /// CoreDNS v1.15.0 plugin/etcd/msg/path.go Path.
 #[must_use]
 pub fn path(name: &str, prefix: &str) -> String {
-    join(prefix, labels_reversed(name))
+    let mut key = String::with_capacity(prefix.len() + 32);
+    join(&mut key, prefix, labels_reversed(name));
+    key
 }
 
 /// Like [`path`], but a name with a wildcard label (`*` or `any`) is cut before the first
@@ -314,19 +316,26 @@ pub fn path(name: &str, prefix: &str) -> String {
 /// CoreDNS v1.15.0 plugin/etcd/msg/path.go PathWithWildcard.
 #[must_use]
 pub fn path_with_wildcard(name: &str, prefix: &str) -> (String, bool) {
+    let mut key = String::with_capacity(prefix.len() + 32);
+    let wildcard = path_with_wildcard_into(&mut key, name, prefix);
+    (key, wildcard)
+}
+
+/// [`path_with_wildcard`] into `key`, which is cleared first, so a caller can reuse its buffer.
+pub(super) fn path_with_wildcard_into(key: &mut String, name: &str, prefix: &str) -> bool {
     let mut wildcard = false;
     let labels = labels_reversed(name).take_while(|label| {
         wildcard = matches!(*label, "*" | "any");
         !wildcard
     });
     // `take_while` is lazy: the flag is only final once the join has consumed the labels.
-    let key = join(prefix, labels);
-    (key, wildcard)
+    join(key, prefix, labels);
+    wildcard
 }
 
 /// Go `path.Join("/"+prefix+"/", labels...)`: elements joined with `/`, then lexically cleaned.
-fn join<'a>(prefix: &str, labels: impl Iterator<Item = &'a str>) -> String {
-    let mut key = String::with_capacity(prefix.len() + 32);
+fn join<'a>(key: &mut String, prefix: &str, labels: impl Iterator<Item = &'a str>) {
+    key.clear();
     // Go path.Clean on a rooted path: empty and `.` elements vanish, `..` removes the element
     // before it, and `..` at the root is dropped.
     let mut push = |element: &str| {
@@ -346,7 +355,6 @@ fn join<'a>(prefix: &str, labels: impl Iterator<Item = &'a str>) -> String {
     if key.is_empty() {
         key.push('/');
     }
-    key
 }
 
 /// The labels of `name` from the root down: Go `dns.SplitDomainName` reversed.
@@ -383,15 +391,23 @@ pub(super) fn labels_reversed(name: &str) -> impl Iterator<Item = &str> {
 /// the leading `/`, and the prefix) are dropped, and a key too short to hold a name is the root.
 #[must_use]
 pub fn domain(key: &str) -> String {
+    let mut name = String::new();
+    domain_into(&mut name, key);
+    name
+}
+
+/// [`domain`] into `name`, which is cleared first, so a caller can reuse its buffer.
+pub(super) fn domain_into(name: &mut String, key: &str) {
+    name.clear();
     let key = key.strip_suffix('/').unwrap_or(key);
     let mut elements = key.splitn(3, '/');
     let rest = elements.nth(2);
     let Some(rest) = rest else {
-        return ".".to_owned();
+        name.push('.');
+        return;
     };
     let mut labels = rest.rsplit('/');
     let last = labels.next_back().unwrap_or_default();
-    let mut name = String::with_capacity(key.len() + 1);
     for label in labels {
         name.push_str(label);
         name.push('.');
@@ -403,11 +419,10 @@ pub fn domain(key: &str) -> String {
         }
     } else {
         name.push_str(last);
-        if !is_fqdn(&name) {
+        if !is_fqdn(name) {
             name.push('.');
         }
     }
-    name
 }
 
 /// miekg/dns IsFqdn: ends in a `.` that is not escaped.
@@ -435,14 +450,17 @@ fn escaped(bytes: &[u8], index: usize) -> bool {
 /// (or any multiple) ends with an empty chunk.
 #[must_use]
 pub fn split255(text: &[u8]) -> Vec<&[u8]> {
-    if text.len() < 255 {
-        return vec![text];
-    }
-    let mut chunks: Vec<&[u8]> = text.chunks(255).collect();
-    if text.len().is_multiple_of(255) {
-        chunks.push(&[]);
-    }
-    chunks
+    chunks255(text).collect()
+}
+
+/// [`split255`] without the `Vec`.
+pub(super) fn chunks255(text: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let long = text.len() >= 255;
+    (!long)
+        .then_some(text)
+        .into_iter()
+        .chain(text.chunks(255).filter(move |_| long))
+        .chain((long && text.len().is_multiple_of(255)).then_some(&[][..]))
 }
 
 /// The name without its leftmost `count` labels, or all of `name` when it has no more labels
