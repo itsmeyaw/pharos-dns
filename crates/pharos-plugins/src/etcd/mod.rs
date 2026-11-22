@@ -4,6 +4,7 @@ pub mod client;
 pub mod msg;
 pub(crate) mod setup;
 mod ttl;
+pub mod view;
 
 #[cfg(test)]
 #[path = "../../tests/support/etcd_stub.rs"]
@@ -80,12 +81,14 @@ pub struct Config {
 #[derive(Debug)]
 pub struct Etcd {
     config: Config,
+    view: view::View,
 }
 
 impl Etcd {
     #[must_use]
     pub fn new(config: Config) -> Self {
-        Self { config }
+        let view = view::View::new(&config);
+        Self { config, view }
     }
 
     #[must_use]
@@ -93,8 +96,16 @@ impl Etcd {
         &self.config
     }
 
-    /// CoreDNS v1.15.0 plugin/etcd/etcd.go OnShutdown: closes the etcd client, which does not exist yet.
-    pub(crate) fn stop(&self) {}
+    /// The etcd keys the Plugin serves from, read through a bounded cache.
+    #[must_use]
+    pub fn view(&self) -> &view::View {
+        &self.view
+    }
+
+    /// CoreDNS v1.15.0 plugin/etcd/etcd.go OnShutdown: closes the etcd client.
+    pub(crate) fn stop(&self) {
+        self.view.stop();
+    }
 }
 
 impl Plugin for Etcd {
