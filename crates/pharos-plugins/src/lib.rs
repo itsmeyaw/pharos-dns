@@ -526,6 +526,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("debug", include_str!("debug/README.md")),
     ("dns64", include_str!("dns64/README.md")),
     ("dnssec", include_str!("dnssec/README.md")),
+    ("dnstap", include_str!("dnstap/README.md")),
     ("dynupdate", include_str!("dynupdate/README.md")),
     ("errors", include_str!("errors/README.md")),
     ("erratic", include_str!("erratic/README.md")),
