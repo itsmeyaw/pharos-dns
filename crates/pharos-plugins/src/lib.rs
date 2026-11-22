@@ -76,6 +76,7 @@ pub mod header;
     feature = "plugin-file",
     feature = "plugin-auto",
     feature = "plugin-azure",
+    feature = "plugin-clouddns",
     feature = "plugin-loadbalance",
     feature = "plugin-kubernetes",
     feature = "plugin-cancel",
@@ -127,6 +128,7 @@ pub mod siit;
     feature = "plugin-secondary",
     feature = "plugin-auto",
     feature = "plugin-azure",
+    feature = "plugin-clouddns",
     feature = "plugin-sign",
     feature = "plugin-dynupdate",
     feature = "plugin-route53"
