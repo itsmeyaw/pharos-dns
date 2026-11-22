@@ -1,5 +1,7 @@
 //! Forward Queries to configured Upstreams.
 
+#[cfg(feature = "plugin-dnstap")]
+mod dnstap;
 mod resolve;
 pub(crate) mod setup;
 
@@ -61,6 +63,9 @@ pub struct Forward {
     stanzas: Vec<Stanza>,
     metrics: Option<ForwardMetrics>,
     buffers: BufferPool,
+    // The Server Block's dnstap taps; empty unless a `dnstap` Directive is configured.
+    #[cfg(feature = "plugin-dnstap")]
+    taps: Vec<crate::dnstap::Tap>,
 }
 
 // shortcut: retain four idle scratch buffers; raise only if measured burst allocations justify memory.
@@ -329,6 +334,12 @@ impl Forward {
         }
     }
 
+    // CoreDNS v1.15.0 plugin/forward/setup.go: a `dnstap` Directive in the same Server Block hands its taps to `forward`.
+    #[cfg(feature = "plugin-dnstap")]
+    pub(crate) fn set_taps(&mut self, taps: &[crate::dnstap::Tap]) {
+        self.taps = taps.to_vec();
+    }
+
     pub(crate) fn stop(&self) {
         for stanza in &self.stanzas {
             for upstream in &stanza.proxies {
@@ -464,6 +475,9 @@ impl Plugin for Forward {
                 }
                 Policy::Sequential => {}
             }
+            // CoreDNS v1.15.0 plugin/forward/forward.go ServeDNS: the time of the first Query to an Upstream is the dnstap query time.
+            #[cfg(feature = "plugin-dnstap")]
+            let tapped_at = (!self.taps.is_empty()).then(std::time::SystemTime::now);
             // RFC 1035 §4.2.1: Retry lost UDP queries after timeout, trying other servers first.
             let deadline = Instant::now() + Duration::from_secs(5);
             let attempt_limit = primary_attempt_limit(
@@ -549,6 +563,19 @@ impl Plugin for Forward {
                     }
                     break result;
                 };
+                #[cfg(feature = "plugin-dnstap")]
+                if let Some(start) = tapped_at {
+                    let exchange = result.as_ref().ok().and_then(|result| result.as_ref().ok());
+                    dnstap::exchanged(
+                        &self.taps,
+                        cx,
+                        start,
+                        proxy.address(),
+                        exchange,
+                        wire,
+                        (options, protocol),
+                    );
+                }
                 let mut exchange = match result {
                     Ok(Ok(exchange)) => exchange,
                     Ok(Err(proxy::Error::Mismatch(_len))) => {

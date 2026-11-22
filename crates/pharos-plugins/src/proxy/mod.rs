@@ -641,6 +641,11 @@ impl Proxy {
         }
     }
 
+    #[must_use]
+    pub fn address(&self) -> SocketAddr {
+        self.address
+    }
+
     /// Set the maximum idle time before an Upstream connection is discarded.
     pub fn set_expire(&mut self, expire: Duration) {
         self.expire = expire;

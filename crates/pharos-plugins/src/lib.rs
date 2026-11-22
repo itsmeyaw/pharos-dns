@@ -752,6 +752,10 @@ pub fn servers_with_registry(
         if let Some(dnstap) = &block.config.dnstap {
             dnstap.set_metrics(&metrics);
         }
+        #[cfg(all(feature = "plugin-forward", feature = "plugin-dnstap"))]
+        if let (Some(forward), Some(dnstap)) = (&mut block.config.forward, &block.config.dnstap) {
+            forward.set_taps(dnstap.taps());
+        }
         #[cfg(feature = "plugin-kubernetes")]
         if let Some(kubernetes) = &block.config.kubernetes {
             kubernetes.set_metrics(&metrics);

@@ -507,3 +507,123 @@ async fn a_tls_listener_serves_a_collector_that_verifies_it() {
         Some(CLIENT_QUERY)
     );
 }
+
+const FORWARDER_QUERY: u64 = 7;
+const FORWARDER_RESPONSE: u64 = 8;
+
+// An Upstream that answers every Query with QR set.
+#[cfg(feature = "plugin-forward")]
+async fn echo_upstream() -> u16 {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = socket.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let mut wire = [0; 512];
+        while let Ok((length, peer)) = socket.recv_from(&mut wire).await {
+            wire[2] |= 0x80;
+            let _ = socket.send_to(&wire[..length], peer).await;
+        }
+    });
+    port
+}
+
+// CoreDNS v1.15.0 plugin/forward/dnstap.go toDnstap: the exchange with the Upstream is tapped between the Query and its Response.
+#[cfg(feature = "plugin-forward")]
+#[tokio::test]
+async fn forward_taps_its_exchange_with_the_upstream_from_the_servers_side() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = socket(dir.path());
+    let listener = UnixListener::bind(&path).unwrap();
+    let upstream = echo_upstream().await;
+    let corefile = format!(".:0 {{\n dnstap {path} full\n forward . 127.0.0.1:{upstream}\n}}");
+    let (server, _, _) = up(&corefile).await;
+    let mut collector = unix_collector(&listener).await;
+
+    let wire = ask(&server, "192.0.2.7:5353", Protocol::Udp).await;
+
+    let mut kinds = Vec::new();
+    let mut messages = Vec::new();
+    for _ in 0..4 {
+        let message = collector.next().await.message.unwrap();
+        kinds.push(message.kind.unwrap());
+        messages.push(message);
+    }
+    assert_eq!(
+        kinds,
+        [
+            CLIENT_QUERY,
+            FORWARDER_QUERY,
+            FORWARDER_RESPONSE,
+            CLIENT_RESPONSE
+        ]
+    );
+    let (query, response) = (&messages[1], &messages[2]);
+    for message in [query, response] {
+        assert_eq!(message.family, Some(INET));
+        assert_eq!(message.protocol, Some(UDP));
+        // The Query address is this server's socket toward the Upstream; the Response address is the Upstream.
+        assert_eq!(message.query_address.as_deref(), Some(&[127, 0, 0, 1][..]));
+        assert!(
+            message
+                .query_port
+                .is_some_and(|port| port != 5353 && port != 0)
+        );
+        assert_eq!(
+            message.response_address.as_deref(),
+            Some(&[127, 0, 0, 1][..])
+        );
+        assert_eq!(message.response_port, Some(u64::from(upstream)));
+    }
+    let query_time = time(query.query_time_sec, query.query_time_nsec);
+    assert_eq!(
+        query_time,
+        time(response.query_time_sec, response.query_time_nsec)
+    );
+    assert!(query_time <= time(response.response_time_sec, response.response_time_nsec));
+    assert_eq!(query.response_time_sec, None);
+    // `full`: the Query goes out as the client sent it, and the Response is the Upstream's.
+    assert_eq!(query.query_message.as_deref(), Some(&QUERY[..]));
+    assert_eq!(query.response_message, None);
+    assert_eq!(response.query_message, None);
+    assert_eq!(response.response_message.as_deref(), Some(&wire[..]));
+}
+
+// CoreDNS v1.15.0 plugin/forward/dnstap.go toDnstap: a failed exchange has no reply, so only the forwarder Query is tapped.
+#[cfg(feature = "plugin-forward")]
+#[tokio::test]
+async fn forward_taps_no_response_when_the_upstream_does_not_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = socket(dir.path());
+    let listener = UnixListener::bind(&path).unwrap();
+    // Nothing listens here: the TCP connect is refused at once.
+    let closed = free_port().await;
+    let corefile =
+        format!(".:0 {{\n dnstap {path}\n forward . 127.0.0.1:{closed} {{\n force_tcp\n }}\n}}");
+    let (server, _, _) = up(&corefile).await;
+    let mut collector = unix_collector(&listener).await;
+
+    let mut response = Vec::new();
+    Box::pin(server.handle(
+        &QUERY,
+        "192.0.2.7:5353".parse().unwrap(),
+        Protocol::Udp,
+        &mut response,
+    ))
+    .await;
+    assert_eq!(response[3] & 15, 2);
+
+    let mut forwarded = 0;
+    loop {
+        let message = collector.next().await.message.unwrap();
+        match message.kind.unwrap() {
+            CLIENT_QUERY => {}
+            FORWARDER_QUERY => {
+                forwarded += 1;
+                assert_eq!(message.protocol, Some(TCP));
+                assert_eq!(message.response_port, Some(u64::from(closed)));
+            }
+            CLIENT_RESPONSE => break,
+            other => panic!("unexpected message type {other}"),
+        }
+    }
+    assert!(forwarded > 0);
+}
