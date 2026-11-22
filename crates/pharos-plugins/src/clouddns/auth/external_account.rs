@@ -71,7 +71,7 @@ enum Subject {
         format: Format,
     },
     Url {
-        url: String,
+        url: Secret,
         headers: Vec<(String, Secret)>,
         format: Option<Format>,
     },
@@ -80,7 +80,7 @@ enum Subject {
 pub(crate) struct ExternalAccount {
     audience: String,
     subject_token_type: String,
-    token_url: String,
+    token_url: Secret,
     client_id: String,
     client_secret: Secret,
     subject: Subject,
@@ -91,6 +91,7 @@ pub(crate) struct ExternalAccount {
 
 impl fmt::Debug for ExternalAccount {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // A signed source or token URL can carry credentials in its query, so `Secret` redacts both.
         f.debug_struct("ExternalAccount")
             .field("audience", &self.audience)
             .field("token_url", &self.token_url)
@@ -116,10 +117,11 @@ impl ExternalAccount {
         Ok(Self {
             audience,
             subject_token_type,
-            token_url: file
-                .token_url
-                .filter(|url| !url.is_empty())
-                .unwrap_or_else(|| DEFAULT_TOKEN_URL.to_owned()),
+            token_url: Secret::new(
+                file.token_url
+                    .filter(|url| !url.is_empty())
+                    .unwrap_or_else(|| DEFAULT_TOKEN_URL.to_owned()),
+            ),
             client_id: file.client_id.unwrap_or_default(),
             client_secret: file.client_secret.unwrap_or_default(),
             subject: Subject::from_source(source)?,
@@ -157,7 +159,7 @@ impl ExternalAccount {
         if let Some(options) = &options {
             fields.push(("options", options));
         }
-        let mut request = Request::post_form(&self.token_url, &fields);
+        let mut request = Request::post_form(self.token_url.expose(), &fields);
         // RFC 6749 §2.3.1: client authentication with HTTP Basic, as cloud.google.com/go/auth StyleInHeader does.
         if !self.client_id.is_empty() && !self.client_secret.is_empty() {
             request = request
@@ -199,7 +201,7 @@ impl Subject {
             let mut headers: Vec<_> = source.headers.unwrap_or_default().into_iter().collect();
             headers.sort_by(|a, b| a.0.cmp(&b.0));
             return Ok(Self::Url {
-                url,
+                url: Secret::new(url),
                 headers,
                 format,
             });
@@ -228,7 +230,7 @@ impl Subject {
                 headers,
                 format,
             } => {
-                let mut request = Request::get(url);
+                let mut request = Request::get(url.expose());
                 for (name, value) in headers {
                     request = request
                         .header(name, value.expose())
@@ -247,6 +249,7 @@ impl Subject {
 }
 
 impl Format {
+    // cloud.google.com/go/auth externalaccount parse of credential_source.format: type text or json (field name required).
     fn from_file(file: FormatFile) -> Result<Self, AuthError> {
         match file.kind.as_deref() {
             Some("text") => Ok(Self::Text),

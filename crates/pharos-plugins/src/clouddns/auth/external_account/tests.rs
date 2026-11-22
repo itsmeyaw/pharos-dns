@@ -279,3 +279,12 @@ async fn debug_hides_headers_and_client_secrets() {
     let text = format!("{:?}", account(source, extra, &sts).unwrap());
     assert!(!text.contains("MARKER"), "{text}");
 }
+
+#[tokio::test]
+async fn debug_hides_source_and_token_endpoint_urls() {
+    let sts = sts().await;
+    let source = json!({"url": "http://127.0.0.1:1/s?sig=URL-MARKER"});
+    let extra = json!({"token_url": "http://127.0.0.1:1/sts?key=STS-MARKER"});
+    let text = format!("{:?}", account(source, extra, &sts).unwrap());
+    assert!(!text.contains("MARKER"), "{text}");
+}
