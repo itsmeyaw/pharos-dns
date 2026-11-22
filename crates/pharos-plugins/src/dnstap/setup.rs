@@ -10,9 +10,9 @@ pub(crate) fn setup(
     cursor: &mut Cursor<'_>,
     block: &mut BlockContext<crate::Chain>,
 ) -> Result<(), Error> {
-    block.config.dnstap = Some(Dnstap {
-        configs: parse(cursor)?,
-    });
+    let dnstap = Dnstap::new(parse(cursor)?);
+    dnstap.register_hooks(&mut block.config.lifecycle);
+    block.config.dnstap = Some(dnstap);
     Ok(())
 }
 

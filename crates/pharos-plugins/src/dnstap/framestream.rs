@@ -46,7 +46,7 @@ pub struct Control {
 }
 
 // fstrm control.h: escape `00 00 00 00`, control frame length, control type, then fields.
-fn put_control(buf: &mut Vec<u8>, kind: ControlType, content_types: &[&[u8]]) {
+pub(crate) fn put_control(buf: &mut Vec<u8>, kind: ControlType, content_types: &[&[u8]]) {
     let length: usize = 4 + content_types.iter().map(|ct| 8 + ct.len()).sum::<usize>();
     buf.extend_from_slice(&0_u32.to_be_bytes());
     buf.extend_from_slice(&(length as u32).to_be_bytes());

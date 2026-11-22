@@ -1,10 +1,25 @@
 //! dnstap Directive: logs Queries and Responses as dnstap messages.
 
 pub mod framestream;
+mod io;
+mod listener;
 pub mod msg;
+mod queue;
 pub(crate) mod setup;
+mod tap;
+#[cfg(test)]
+mod testing;
+#[cfg(test)]
+mod tests;
 
-use pharos_server::{Context, Next, Outcome, Plugin};
+use std::{cell::RefCell, time::SystemTime};
+
+use pharos_proto::{MessageBuilder, Opcode, Rcode};
+use pharos_server::{Context, Lifecycle, Next, Outcome, Phase, Plugin, Protocol};
+use tokio::task::JoinSet;
+
+use self::msg::{Message, MessageType, SocketProtocol};
+pub use self::tap::Tap;
 
 /// Where a sink connects or listens.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -57,19 +72,155 @@ pub struct Config {
 /// The `dnstap` Directives of one Server Block.
 #[derive(Debug)]
 pub struct Dnstap {
-    configs: Vec<Config>,
+    taps: Vec<Tap>,
+    any_full: bool,
+}
+
+thread_local! {
+    // The header-only Response the Server will write for a Query that no Plugin answered.
+    static DEFERRED: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 impl Dnstap {
-    /// The parsed Directives in Corefile order.
-    #[must_use]
-    pub fn configs(&self) -> &[Config] {
-        &self.configs
+    pub(crate) fn new(configs: Vec<Config>) -> Self {
+        Self {
+            any_full: configs.iter().any(|config| config.full),
+            taps: configs.into_iter().map(Tap::new).collect(),
+        }
     }
+
+    /// The configured taps in Corefile order. Clones share the queue and the background task.
+    ///
+    /// A Plugin that emits its own dnstap messages (CoreDNS `forward` sends FORWARDER_QUERY and
+    /// FORWARDER_RESPONSE) holds clones and calls `Tap::send`.
+    #[must_use]
+    pub fn taps(&self) -> &[Tap] {
+        &self.taps
+    }
+
+    pub(crate) fn set_metrics(&self, registry: &pharos_server::metrics::Registry) {
+        for tap in &self.taps {
+            tap.set_metrics(registry);
+        }
+    }
+
+    /// Dials or listens at Startup and closes at Restart and Shutdown, as CoreDNS OnStartup, OnRestart and OnFinalShutdown.
+    pub(crate) fn register_hooks(&self, lifecycle: &mut Lifecycle) {
+        let taps = self.taps.clone();
+        let start = move || {
+            let taps = taps.clone();
+            async move {
+                for tap in &taps {
+                    tap.start().await;
+                }
+                Ok(())
+            }
+        };
+        // A failed reload resumes the old configuration, whose Restart hook has already closed its taps.
+        lifecycle.register(Phase::Startup, start.clone());
+        lifecycle.register(Phase::RestartFailed, start);
+        let taps = self.taps.clone();
+        let stop = move || {
+            let taps = taps.clone();
+            async move {
+                let mut stopping = JoinSet::new();
+                for tap in taps {
+                    stopping.spawn(async move { tap.stop().await });
+                }
+                while stopping.join_next().await.is_some() {}
+                Ok(())
+            }
+        };
+        lifecycle.register(Phase::Restart, stop.clone());
+        lifecycle.register(Phase::Shutdown, stop);
+    }
+
+    fn tap_query(&self, cx: &Context<'_, '_>, query_time: SystemTime) {
+        for tap in &self.taps {
+            // CoreDNS v1.15.0 plugin/dnstap/handler.go tapQuery.
+            let mut message = Message::new(MessageType::ClientQuery);
+            message.set_query_time(query_time);
+            message.set_query_address(cx.client, socket_protocol(cx.protocol));
+            if tap.include_raw() {
+                message.set_query_message(cx.query.as_wire());
+            }
+            tap.send_with(&message, cx);
+        }
+    }
+
+    fn tap_response(&self, cx: &Context<'_, '_>, query_time: SystemTime, wire: &[u8]) {
+        let response_time = SystemTime::now();
+        for tap in &self.taps {
+            // CoreDNS v1.15.0 plugin/dnstap/writer.go tapResponse: the client address and both times, no query message.
+            let mut message = Message::new(MessageType::ClientResponse);
+            message.set_query_time(query_time);
+            message.set_response_time(response_time);
+            message.set_query_address(cx.client, socket_protocol(cx.protocol));
+            if tap.include_raw() {
+                message.set_response_message(wire);
+            }
+            tap.send_with(&message, cx);
+        }
+    }
+
+    // CoreDNS v1.15.0 plugin/dnstap/handler.go ServeDNS (#6532): an error Response written after the chain returns is tapped too.
+    fn tap_deferred(&self, cx: &Context<'_, '_>, query_time: SystemTime, rcode: Rcode) {
+        DEFERRED.with_borrow_mut(|wire| {
+            if self.any_full {
+                write_error(cx.query, wire, rcode);
+            }
+            self.tap_response(cx, query_time, wire);
+        });
+    }
+}
+
+// RFC 1035 §4.1.1: the SocketProtocol follows the transport the client used; CoreDNS maps net.UDPAddr and net.TCPAddr.
+fn socket_protocol(protocol: Protocol) -> SocketProtocol {
+    match protocol {
+        Protocol::Udp => SocketProtocol::Udp,
+        Protocol::Tcp => SocketProtocol::Tcp,
+    }
+}
+
+// Mirrors the Server's own error Response (pharos_server admission `write_error`), which is what the client receives.
+fn write_error(query: pharos_proto::Message<'_>, response: &mut Vec<u8>, rcode: Rcode) {
+    // RFC 1035 §4.1.1: QR marks a Response; the opcode and RD are copied from the Query.
+    let flags = 0x8000
+        | (query.flags() & 0x7800)
+        | if query.opcode() == Opcode::QUERY {
+            // RFC 4035 §3.2.2: copy the Query's CD bit into the Response.
+            query.flags() & 0x0110
+        } else {
+            0
+        }
+        | (rcode.0 & 15);
+    let mut builder = MessageBuilder::new(response, usize::from(u16::MAX), query.id(), flags)
+        .expect("valid maximum");
+    if let Some(question) = query.questions().next() {
+        let _ = builder.question(question.name, question.qtype, question.qclass);
+    }
+    let _ = builder.finish();
 }
 
 impl Plugin for Dnstap {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
-        next.run(cx).await
+        let query_time = SystemTime::now();
+        // CoreDNS v1.15.0 plugin/dnstap/handler.go ServeDNS: the query is tapped before the chain runs, so the messages stay in order.
+        self.tap_query(cx, query_time);
+        let outcome = next.run(cx).await;
+        match &outcome {
+            Outcome::Response => self.tap_response(cx, query_time, cx.response),
+            Outcome::Error(_) => self.tap_deferred(cx, query_time, Rcode::SERVFAIL),
+            // The Server answers these after the chain returns; any other code is dropped unanswered.
+            Outcome::Unanswered(
+                code @ (Rcode::SERVFAIL
+                | Rcode::REFUSED
+                | Rcode::FORMERR
+                | Rcode::NOTIMP
+                | Rcode::NOTAUTH),
+            ) => self.tap_deferred(cx, query_time, *code),
+            Outcome::Unanswered(_) | Outcome::Stream(_) | Outcome::Drop => {}
+        }
+        outcome
     }
 }

@@ -747,6 +747,11 @@ pub fn servers_with_registry(
         if let Some(trace) = &block.config.trace {
             trace.set_metrics(&metrics);
         }
+
+        #[cfg(feature = "plugin-dnstap")]
+        if let Some(dnstap) = &block.config.dnstap {
+            dnstap.set_metrics(&metrics);
+        }
         #[cfg(feature = "plugin-kubernetes")]
         if let Some(kubernetes) = &block.config.kubernetes {
             kubernetes.set_metrics(&metrics);

@@ -295,9 +295,9 @@ fn several_directives_configure_taps_in_order() {
         pharos_corefile::configure::<crate::Chain>(&blocks, crate::directives()).unwrap();
     let dnstap = configured[0].config.dnstap.as_ref().unwrap();
     let endpoints: Vec<_> = dnstap
-        .configs()
+        .taps()
         .iter()
-        .map(|c| c.endpoint.clone())
+        .map(|tap| tap.config().endpoint.clone())
         .collect();
     assert_eq!(
         endpoints,
