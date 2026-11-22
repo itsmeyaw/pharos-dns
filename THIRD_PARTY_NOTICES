@@ -25,6 +25,7 @@
 - The azure Plugin and tests follow CoreDNS v1.15.0's `plugin/azure`.
 - The secondary Plugin and tests follow CoreDNS v1.15.0's `plugin/secondary`, `plugin/file/secondary.go`, and `plugin/pkg/catalog`.
 - The sign Plugin, fixtures, tests and differential scenario follow CoreDNS v1.15.0's `plugin/sign`.
+- The nomad Plugin and tests follow CoreDNS v1.15.0's `plugin/nomad`.
 - The dns64 Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/dns64`.
 - The siit Plugin, tests and differential scenario follow CoreDNS v1.15.0's `plugin/siit`.
 - The rewrite Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/rewrite`.
