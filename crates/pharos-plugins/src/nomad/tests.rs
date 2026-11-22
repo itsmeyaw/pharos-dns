@@ -525,3 +525,70 @@ async fn a_hung_nomad_does_not_hang_the_query() {
         .unwrap();
     assert_eq!(render(&got).rcode, Rcode::NOERROR);
 }
+
+fn counted(registry: &pharos_server::metrics::Registry) -> Vec<String> {
+    let mut text = String::new();
+    registry.encode(&mut text);
+    text.lines()
+        .filter(|line| line.starts_with("pharos_nomad_"))
+        .map(str::to_owned)
+        .collect()
+}
+
+// CoreDNS v1.15.0 plugin/nomad/nomad.go: success counts a written answer; lookup failures and the NXDOMAIN path count as failed.
+#[tokio::test]
+async fn requests_are_counted_by_server_and_namespace() {
+    let (mut nomad, _stub) = plugin().await;
+    let registry = pharos_server::metrics::Registry::new("test", "test", "test");
+    nomad.set_metrics(
+        &registry,
+        &[pharos_server::ListenerKey {
+            transport: Transport::Dns,
+            address: "127.0.0.1:53".parse().unwrap(),
+        }],
+    );
+    assert!(counted(&registry).is_empty());
+    ask(&nomad, "example.default.service.nomad.", Type::A).await;
+    ask(&nomad, "Example.Default.service.nomad.", Type::SRV).await;
+    ask(&nomad, "nonexistent.default.service.nomad.", Type::A).await;
+    ask(&nomad, "example.Prod.service.nomad.", Type::A).await;
+    ask(&nomad, "example.default.service.nomad.", Type::TXT).await;
+    // Outside the zone the Query is not ours and is not counted.
+    assert!(
+        serve(&nomad, &query("example.com.", Type::A, Class::IN))
+            .await
+            .is_err()
+    );
+    let lines = counted(&registry);
+    for expected in [
+        "pharos_nomad_success_requests_total{namespace=\"default\",server=\"dns://127.0.0.1:53\"} 2",
+        "pharos_nomad_failed_requests_total{namespace=\"default\",server=\"dns://127.0.0.1:53\"} 2",
+        "pharos_nomad_success_requests_total{namespace=\"prod\",server=\"dns://127.0.0.1:53\"} 1",
+    ] {
+        assert!(
+            lines.iter().any(|line| line == expected),
+            "{expected}\n{lines:#?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_failed_lookup_counts_as_failed() {
+    let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = format!("http://{}", dead.local_addr().unwrap());
+    drop(dead);
+    let mut nomad = Nomad::new(settings(vec![address]), &|_| None).unwrap();
+    let registry = pharos_server::metrics::Registry::new("test", "test", "test");
+    nomad.set_metrics(
+        &registry,
+        &[pharos_server::ListenerKey {
+            transport: Transport::Dns,
+            address: "127.0.0.1:53".parse().unwrap(),
+        }],
+    );
+    ask(&nomad, "example.default.service.nomad.", Type::A).await;
+    assert_eq!(
+        counted(&registry).last().unwrap(),
+        "pharos_nomad_failed_requests_total{namespace=\"default\",server=\"dns://127.0.0.1:53\"} 1"
+    );
+}

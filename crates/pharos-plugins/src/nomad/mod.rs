@@ -2,6 +2,7 @@
 
 mod client;
 mod escape;
+mod ready;
 mod registration;
 mod response;
 pub(crate) mod setup;
@@ -9,9 +10,12 @@ pub(crate) mod setup;
 mod stub;
 
 use pharos_proto::{Class, Name, NameRef, Opcode};
-use pharos_server::{Context, Next, Outcome, Plugin, Protocol};
+use std::{net::SocketAddr, sync::Arc};
+
+use pharos_server::{Context, Next, Outcome, Plugin, Protocol, Readiness, metrics::NomadMetrics};
 
 use client::{Client, Options};
+use ready::Health;
 use response::Reply;
 
 /// CoreDNS v1.15.0 plugin/nomad/nomad.go `defaultTTL`: seconds a Response record lives unless `ttl` says otherwise.
@@ -51,7 +55,10 @@ pub struct Nomad {
     zone_labels: usize,
     /// The wire name `hostmaster.<zone>`.
     mailbox: Vec<u8>,
-    client: Client,
+    client: Arc<Client>,
+    health: Arc<Health>,
+    /// The metrics of each Listener, found by the Query's local address.
+    metrics: Vec<(SocketAddr, NomadMetrics)>,
 }
 
 impl Nomad {
@@ -83,14 +90,37 @@ impl Nomad {
             .iter()
             .any(|address| address.starts_with("https://"));
         let options = Options::from_env(env, settings.token, https)?;
+        let client = Arc::new(Client::new(&addresses, options)?);
         Ok(Self {
             ttl: settings.ttl,
             filter: settings.filter,
             zone: zone.as_wire().to_ascii_lowercase(),
             zone_labels: zone.label_count(),
             mailbox,
-            client: Client::new(&addresses, options)?,
+            health: Health::new(Arc::clone(&client)),
+            client,
+            metrics: Vec::new(),
         })
+    }
+
+    pub(crate) fn register(&self, lifecycle: &mut pharos_server::Lifecycle) {
+        self.health.register(lifecycle);
+    }
+
+    pub(crate) fn set_metrics(
+        &mut self,
+        registry: &pharos_server::metrics::Registry,
+        listeners: &[pharos_server::ListenerKey],
+    ) {
+        for listener in listeners {
+            let address = listener.address;
+            let server = if address.ip().is_unspecified() {
+                format!("dns://:{}", address.port())
+            } else {
+                format!("dns://{address}")
+            };
+            self.metrics.push((address, registry.nomad(&server)));
+        }
     }
 
     /// The service and namespace labels of a lower-cased Query name inside the zone.
@@ -181,8 +211,28 @@ impl Plugin for Nomad {
             ttl: self.ttl,
             mailbox: &self.mailbox,
         };
-        response::build(cx.response, &reply, registrations.as_deref())
-            .map_or_else(Outcome::Error, |()| Outcome::Response)
+        match response::build(cx.response, &reply, registrations.as_deref()) {
+            Ok(success) => {
+                // CoreDNS v1.15.0 plugin/nomad/nomad.go ServeDNS: the counters are labelled by the Query's namespace.
+                if let Some((_, metrics)) = self
+                    .metrics
+                    .iter()
+                    .find(|(address, _)| *address == cx.local)
+                {
+                    if success {
+                        metrics.success(namespace);
+                    } else {
+                        metrics.failure(namespace);
+                    }
+                }
+                Outcome::Response
+            }
+            Err(error) => Outcome::Error(error),
+        }
+    }
+
+    fn readiness(&self) -> Option<&dyn Readiness> {
+        Some(&*self.health)
     }
 }
 

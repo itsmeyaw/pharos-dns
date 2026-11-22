@@ -337,13 +337,45 @@ impl Client {
     }
 
     async fn get(&self, endpoint: &Endpoint, target: &str) -> Result<Vec<Registration>, Error> {
+        let body = self.fetch(endpoint, target).await?;
+        registration::decode(&body).map_err(Error::Decode)
+    }
+
+    async fn fetch(&self, endpoint: &Endpoint, target: &str) -> Result<Vec<u8>, Error> {
         let (status, body) = timeout(self.timeout, self.exchange(endpoint, target))
             .await
             .map_err(|_| Error::Timeout)??;
         if status != 200 {
             return Err(Error::Status(status));
         }
-        registration::decode(&body).map_err(Error::Decode)
+        Ok(body)
+    }
+
+    /// Whether any endpoint answers `/v1/agent/self`, trying them from the last good one onwards.
+    // CoreDNS v1.15.0 plugin/nomad/setup.go getClient: `Agent().Self()` decodes a JSON body after `requireOK`.
+    pub(super) async fn probe(&self) -> bool {
+        let mut target = String::from("/v1/agent/self");
+        if let Some(region) = &self.region {
+            target.push_str("?region=");
+            escape::query_component(&mut target, region.as_bytes());
+        }
+        let start = self.current.load(Ordering::Relaxed);
+        for step in 0..self.endpoints.len() {
+            let index = (start + step) % self.endpoints.len();
+            let answered = match self.fetch(&self.endpoints[index], &target).await {
+                Ok(body) => serde_json::from_slice::<serde::de::IgnoredAny>(&body).is_ok(),
+                Err(_) => false,
+            };
+            if answered {
+                self.current.store(index, Ordering::Relaxed);
+                return true;
+            }
+        }
+        false
+    }
+
+    pub(super) fn endpoints(&self) -> usize {
+        self.endpoints.len()
     }
 
     async fn exchange(&self, endpoint: &Endpoint, target: &str) -> Result<(u16, Vec<u8>), Error> {

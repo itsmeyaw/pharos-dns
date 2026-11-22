@@ -33,12 +33,12 @@ fn ipv4(address: IpAddr) -> Option<Ipv4Addr> {
     }
 }
 
-/// `registrations` is `None` when the lookup failed.
+/// `registrations` is `None` when the lookup failed. Returns whether the Response is a success: a failed lookup and an NXDOMAIN answer are not.
 pub(super) fn build(
     out: &mut Vec<u8>,
     reply: &Reply<'_>,
     registrations: Option<&[Registration]>,
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
     let qtype = reply.question.qtype;
     let (served, denied) = match registrations {
         // CoreDNS nomad.go handleServiceLookupError: NOERROR, authoritative, no records.
@@ -154,7 +154,7 @@ pub(super) fn build(
         }
     }
     let _ = builder.finish();
-    Ok(())
+    Ok(registrations.is_some() && !denied)
 }
 
 // CoreDNS v1.15.0 plugin/nomad/helpers.go createSOARecord, placed in the Answer section as CoreDNS does.

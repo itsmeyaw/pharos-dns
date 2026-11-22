@@ -749,6 +749,7 @@ pub fn servers_with_registry(
             feature = "plugin-siit",
             feature = "plugin-autopath",
             feature = "plugin-template",
+            feature = "plugin-nomad",
             feature = "plugin-tsig"
         ))]
         let mut block = block;
@@ -954,6 +955,11 @@ pub fn servers_with_registry(
         if let Some(siit) = &mut block.config.siit {
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
             siit.set_metrics(&metrics, &listeners);
+        }
+        #[cfg(feature = "plugin-nomad")]
+        if let Some(nomad) = &mut block.config.nomad {
+            let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+            nomad.set_metrics(&metrics, &listeners);
         }
         #[cfg(feature = "plugin-autopath")]
         if let Some(provider) = block

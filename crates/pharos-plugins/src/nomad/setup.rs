@@ -10,6 +10,7 @@ pub(crate) fn setup(
     let settings = parse(cursor)?;
     let nomad = Nomad::new(settings, &|name| std::env::var(name).ok())
         .map_err(|message| cursor.error(message))?;
+    nomad.register(&mut block.config.lifecycle);
     block.config.nomad = Some(nomad);
     Ok(())
 }
