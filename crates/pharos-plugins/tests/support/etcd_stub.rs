@@ -114,21 +114,27 @@ impl Drop for EtcdStub {
 
 impl EtcdStub {
     pub async fn start() -> Self {
-        Self::bind(false).await
+        Self::bind(None).await
     }
 
     /// A stub that speaks TLS with the `tests/fixtures/tls` server certificate, valid for `localhost` and `127.0.0.1`.
     pub async fn start_tls() -> Self {
-        Self::bind(true).await
+        Self::bind(Some(ClientAuth::NoCert)).await
     }
 
-    async fn bind(tls: bool) -> Self {
-        let acceptor = tls.then(|| {
+    /// Like [`Self::start_tls`], and a client certificate is required and must chain to the `tests/fixtures/tls` CA.
+    pub async fn start_mutual_tls() -> Self {
+        Self::bind(Some(ClientAuth::RequireAndVerify)).await
+    }
+
+    async fn bind(tls: Option<ClientAuth>) -> Self {
+        let acceptor = tls.map(|client_auth| {
             ServerTls::load(&ServerOptions {
                 cert: format!("{FIXTURES}/server.pem").into(),
                 key: format!("{FIXTURES}/server.key.pem").into(),
-                ca: None,
-                client_auth: ClientAuth::NoCert,
+                ca: (client_auth != ClientAuth::NoCert)
+                    .then(|| format!("{FIXTURES}/ca.pem").into()),
+                client_auth,
                 keylog: None,
             })
             .unwrap()

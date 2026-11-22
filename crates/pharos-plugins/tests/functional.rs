@@ -17,6 +17,10 @@ mod auto;
 #[path = "functional/clouddns.rs"]
 mod clouddns;
 
+#[cfg(feature = "plugin-etcd")]
+#[path = "functional/etcd.rs"]
+mod etcd;
+
 #[cfg(feature = "plugin-file")]
 #[path = "functional/file.rs"]
 mod file;
