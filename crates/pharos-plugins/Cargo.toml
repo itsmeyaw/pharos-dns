@@ -55,6 +55,7 @@ default = [
     "plugin-any",
     "plugin-autopath",
     "plugin-auto",
+    "plugin-azure",
     "plugin-bind",
     "plugin-bufsize",
     "plugin-cache",
@@ -151,7 +152,7 @@ plugin-transfer = []
 plugin-dynupdate = []
 plugin-hosts = []
 plugin-route53 = ["dep:aws-config", "dep:aws-runtime", "dep:aws-sdk-route53"]
-plugin-azure = []
+plugin-azure = ["dep:serde", "dep:serde_json"]
 plugin-clouddns = []
 plugin-k8s-external = ["plugin-kubernetes"]
 plugin-kubernetes = ["dep:pharos-kubernetes"]

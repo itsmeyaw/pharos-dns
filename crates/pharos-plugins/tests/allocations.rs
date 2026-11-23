@@ -63,6 +63,10 @@ mod file_allocations;
 #[path = "allocations/auto_allocations.rs"]
 mod auto_allocations;
 
+#[cfg(feature = "plugin-azure")]
+#[path = "allocations/azure_allocations.rs"]
+mod azure_allocations;
+
 #[cfg(feature = "plugin-secondary")]
 #[path = "allocations/secondary_allocations.rs"]
 mod secondary_allocations;
