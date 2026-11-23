@@ -257,6 +257,12 @@ mod nsid {
 }
 
 #[path = "allocations"]
+mod trace {
+    #[path = "trace_allocations.rs"]
+    mod trace_allocations;
+}
+
+#[path = "allocations"]
 mod proxy {
     #[path = "proxy_allocations.rs"]
     mod proxy_allocations;

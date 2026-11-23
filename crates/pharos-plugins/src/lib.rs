@@ -75,7 +75,8 @@ pub mod header;
     feature = "plugin-kubernetes",
     feature = "plugin-cancel",
     feature = "plugin-timeouts",
-    feature = "plugin-erratic"
+    feature = "plugin-erratic",
+    feature = "plugin-trace"
 ))]
 pub mod health;
 #[cfg(feature = "plugin-hosts")]
@@ -158,6 +159,8 @@ pub mod template;
 pub mod timeouts;
 #[cfg(feature = "plugin-tls")]
 pub mod tls;
+#[cfg(feature = "plugin-trace")]
+pub mod trace;
 #[cfg(feature = "plugin-transfer")]
 pub mod transfer;
 #[cfg(feature = "plugin-tsig")]
@@ -559,6 +562,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("tls", include_str!("tls/README.md")),
     ("tsig", include_str!("tsig/README.md")),
     ("transfer", include_str!("transfer/README.md")),
+    ("trace", include_str!("trace/README.md")),
     ("view", include_str!("view/README.md")),
     ("whoami", include_str!("whoami/README.md")),
 ];
@@ -730,6 +734,10 @@ pub fn servers_with_registry(
         #[cfg(feature = "plugin-hosts")]
         if let Some(hosts) = &block.config.hosts {
             hosts.set_metrics(&metrics);
+        }
+        #[cfg(feature = "plugin-trace")]
+        if let Some(trace) = &block.config.trace {
+            trace.set_metrics(&metrics);
         }
         #[cfg(feature = "plugin-kubernetes")]
         if let Some(kubernetes) = &block.config.kubernetes {

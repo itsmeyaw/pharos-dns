@@ -308,6 +308,12 @@ mod nsid {
 }
 
 #[path = "functional"]
+mod trace {
+    #[path = "trace.rs"]
+    mod cases;
+}
+
+#[path = "functional"]
 mod prometheus {
     #[path = "prometheus.rs"]
     mod cases;

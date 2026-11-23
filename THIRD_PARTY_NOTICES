@@ -16,6 +16,7 @@
 - The quic Plugin, DoQ stream handling and tests follow CoreDNS v1.15.0's `plugin/quic`, `core/dnsserver/server_quic.go` and `server_quic_test.go`.
 - The https3 Plugin, HTTP/3 Listener and tests follow CoreDNS v1.15.0's `plugin/https3`, `core/dnsserver/server_https3.go` and `server_https3_test.go`.
 - The proxyproto Plugin, UDP session handling and tests follow CoreDNS v1.15.0's `plugin/proxyproto` and `plugin/pkg/proxyproto`; header limits and policy semantics follow go-proxyproto v0.15.0 (Apache-2.0, Copyright 2016 Paulo Pires).
+- The trace Plugin, setup and tests follow CoreDNS v1.15.0's `plugin/trace`; span encoding follows zipkin-go v0.4.3 (Apache-2.0) and zipkin-go-opentracing v0.5.0 (Apache-2.0); Datadog span encoding follows dd-trace-go v2.10.1 (Apache-2.0, Copyright Datadog, Inc.).
 - The acl Plugin setup and tests follow CoreDNS v1.15.0's `plugin/acl`.
 - The transfer Plugin setup and tests follow CoreDNS v1.15.0's `plugin/transfer`.
 - The file Plugin and tests follow CoreDNS v1.15.0's `plugin/file`.

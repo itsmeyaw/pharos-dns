@@ -357,3 +357,29 @@ fn go_float_formatting() {
         assert_eq!(super::float(value), expected);
     }
 }
+
+#[test]
+fn trace_series_appear_once_the_plugin_registers() {
+    let registry = super::Registry::default();
+    let mut out = String::new();
+    registry.encode(&mut out);
+    assert!(!out.contains("pharos_trace_"));
+    let trace = registry.trace();
+    trace.exported(3);
+    trace.dropped_queue_full(2);
+    trace.dropped_export_failed(1);
+    out.clear();
+    registry.encode(&mut out);
+    assert!(
+        out.contains("pharos_trace_exported_spans_total 3\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("pharos_trace_dropped_spans_total{reason=\"queue_full\"} 2\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("pharos_trace_dropped_spans_total{reason=\"export_failed\"} 1\n"),
+        "{out}"
+    );
+}

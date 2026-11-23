@@ -94,6 +94,7 @@ default = [
     "plugin-sign",
     "plugin-template",
     "plugin-tls",
+    "plugin-trace",
     "plugin-view",
     "plugin-whoami",
 ]

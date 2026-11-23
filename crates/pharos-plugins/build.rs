@@ -130,6 +130,7 @@ fn main() {
             "secondary" => "secondary::Secondary",
             "sign" => "sign::Sign",
             "erratic" => "erratic::Erratic",
+            "trace" => "trace::Trace",
             _ => "Unimplemented",
         };
         writeln!(code, "pub r#{name}: Option<{ty}>,").unwrap();
@@ -193,6 +194,7 @@ fn main() {
             "secondary" => "secondary::setup::setup",
             "sign" => "sign::setup::setup",
             "erratic" => "erratic::setup::setup",
+            "trace" => "trace::setup::setup",
             "kubernetes" => "kubernetes::setup::setup",
             _ => "setup_unimplemented",
         };
