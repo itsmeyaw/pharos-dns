@@ -42,6 +42,8 @@ pub mod cache;
 pub mod cancel;
 #[cfg(feature = "plugin-chaos")]
 pub mod chaos;
+#[cfg(feature = "plugin-clouddns")]
+pub mod clouddns;
 #[cfg(feature = "plugin-debug")]
 pub mod debug;
 #[cfg(any(feature = "plugin-kubernetes", feature = "plugin-k8s-external"))]
@@ -74,6 +76,7 @@ pub mod header;
     feature = "plugin-file",
     feature = "plugin-auto",
     feature = "plugin-azure",
+    feature = "plugin-clouddns",
     feature = "plugin-loadbalance",
     feature = "plugin-kubernetes",
     feature = "plugin-cancel",
@@ -125,6 +128,7 @@ pub mod siit;
     feature = "plugin-secondary",
     feature = "plugin-auto",
     feature = "plugin-azure",
+    feature = "plugin-clouddns",
     feature = "plugin-sign",
     feature = "plugin-dynupdate",
     feature = "plugin-route53"
@@ -532,6 +536,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("cache", include_str!("cache/README.md")),
     ("cancel", include_str!("cancel/README.md")),
     ("chaos", include_str!("chaos/README.md")),
+    ("clouddns", include_str!("clouddns/README.md")),
     ("debug", include_str!("debug/README.md")),
     ("dns64", include_str!("dns64/README.md")),
     ("dnssec", include_str!("dnssec/README.md")),

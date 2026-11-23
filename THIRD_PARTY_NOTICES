@@ -29,6 +29,7 @@
 - The siit Plugin, tests and differential scenario follow CoreDNS v1.15.0's `plugin/siit`.
 - The rewrite Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/rewrite`.
 - The autopath Plugin and tests follow CoreDNS v1.15.0's `plugin/autopath` and miekg/dns resolver configuration parsing.
+- The clouddns Plugin and tests follow CoreDNS v1.15.0's `plugin/clouddns`.
 - The erratic Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/erratic` and miekg/dns transfer output.
 - The geoip Plugin and tests follow CoreDNS v1.15.0's `plugin/geoip`; the `GeoLite2-*.mmdb` fixtures in `crates/pharos-plugins/tests/fixtures/geoip` are copied from its `plugin/geoip/testdata` (Apache-2.0, generated with MaxMind's mmdbwriter from synthetic data, no MaxMind database content). The `Pharos-*.mmdb` fixtures there are generated from synthetic data with mmdb-writer 0.2.7 (MIT). Lookups use the `maxminddb` crate (ISC, Copyright Gregory J. Oschwald).
 - The whoami Plugin and tests follow CoreDNS v1.15.0's `plugin/whoami`.
@@ -259,6 +260,12 @@ insights.
 - License: Apache-2.0
 - Copyright 2015 Microsoft Corporation
 - The authentication, cloud environment endpoints, token refresh and retry behavior in `crates/pharos-plugins/src/azure` follow go-autorest v0.11.30's `autorest/azure/auth`, `autorest/azure/environments.go`, `autorest/adal` and `autorest` defaults, as used by CoreDNS v1.15.0's `plugin/azure`.
+## googleapis/google-cloud-go auth
+
+- Source: https://github.com/googleapis/google-cloud-go (module `cloud.google.com/go/auth`, tag `auth/v0.24.0`)
+- License: Apache-2.0
+- Copyright Google LLC
+- The credential discovery, token sources (service account, authorized user, external account, impersonation, metadata server) and refresh behavior in `crates/pharos-plugins/src/clouddns/auth` follow cloud.google.com/go/auth v0.24's `credentials`, `oauth2adapt`, `internal/credsfile`, `internal/externalaccount` and `httptransport` defaults, as used by CoreDNS v1.15.0's `plugin/clouddns`.
 
 ## miekg/dns
 

@@ -13,6 +13,10 @@ mod sign;
 #[path = "functional/auto.rs"]
 mod auto;
 
+#[cfg(feature = "plugin-clouddns")]
+#[path = "functional/clouddns.rs"]
+mod clouddns;
+
 #[cfg(feature = "plugin-file")]
 #[path = "functional/file.rs"]
 mod file;

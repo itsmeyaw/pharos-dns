@@ -163,3 +163,7 @@ tracked in #171. The `rewrite` imaginary `some-plugin` example cannot run becaus
 does not exist. The `sign` examples
 using `key directory` are rejected by CoreDNS itself. The final `sign` example
 demonstrates a configuration pitfall rather than a stable Response.
+
+The `clouddns` README examples have no differential scenario: the Plugin reads
+Google Cloud DNS, which the harness cannot reach. The Plugin's behaviour is
+covered by Rust tests against local stubs of the Google endpoints.
