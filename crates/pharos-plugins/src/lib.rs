@@ -127,6 +127,8 @@ mod self_lookup_test;
 
 #[cfg(feature = "plugin-forward")]
 pub mod forward;
+#[cfg(feature = "plugin-geoip")]
+pub mod geoip;
 
 #[cfg(feature = "plugin-log")]
 pub mod log;
@@ -524,6 +526,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("auto", include_str!("auto/README.md")),
     ("secondary", include_str!("secondary/README.md")),
     ("forward", include_str!("forward/README.md")),
+    ("geoip", include_str!("geoip/README.md")),
     ("grpc", include_str!("grpc/README.md")),
     ("grpc_server", include_str!("grpc_server/README.md")),
     ("header", include_str!("header/README.md")),

@@ -5,6 +5,7 @@ pub(crate) mod setup;
 use pharos_corefile::{Cursor, Error, origins_from_args_or_server_block};
 use pharos_proto::Name;
 #[cfg(any(
+    feature = "plugin-geoip",
     feature = "plugin-kubernetes",
     feature = "plugin-view",
     feature = "plugin-proxyproto"
@@ -27,6 +28,7 @@ pub struct Metadata {
 
 impl Metadata {
     #[cfg(any(
+        feature = "plugin-geoip",
         feature = "plugin-kubernetes",
         feature = "plugin-view",
         feature = "plugin-proxyproto"

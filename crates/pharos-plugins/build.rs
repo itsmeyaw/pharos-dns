@@ -111,6 +111,7 @@ fn main() {
             "view" => "view::View",
             "log" => "log::Log",
             "metadata" => "metadata::Metadata",
+            "geoip" => "geoip::GeoIp",
             "loop" => "r#loop::Loop",
             "prometheus" => "prometheus::Prometheus",
             "ready" => "ready::Ready",
@@ -174,6 +175,7 @@ fn main() {
             "view" => "view::setup::setup",
             "log" => "log::setup::setup",
             "metadata" => "metadata::setup::setup",
+            "geoip" => "geoip::setup::setup",
             "loop" => "r#loop::setup::setup",
             "prometheus" => "prometheus::setup::setup",
             "ready" => "ready::setup::setup",
@@ -279,6 +281,10 @@ fn main() {
     if enabled.contains(&"metadata") && enabled.contains(&"proxyproto") {
         code.push_str("\nif self.metadata.as_ref().is_some_and(|plugin| plugin.matches(cx)) { cx.metadata.publish_proxy_tlv(); }\n");
     }
+    // CoreDNS v1.15.0 plugin/metadata/metadata.go: Metadata providers run in Plugin Order before the rest of the chain.
+    if enabled.contains(&"metadata") && enabled.contains(&"geoip") {
+        code.push_str("\nif self.metadata.as_ref().is_some_and(|plugin| plugin.matches(cx)) && let Some(plugin) = &self.geoip { plugin.collect_metadata(cx); } ");
+    }
     writeln!(code, "}} self.serve_{}(cx) }}", next_plugin(&enabled, 0)).unwrap();
     if let Some(index) = enabled.iter().position(|name| *name == "cache") {
         writeln!(code, "async fn cache_refresh_next(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ #[cfg(all(test, feature = \"plugin-cache\", feature = \"plugin-hosts\"))] if let Some(plugin) = &self.self_lookup_test {{ return plugin.serve(cx).await; }} self.serve_{}(cx).await }}", next_plugin(&enabled, index + 1)).unwrap();
@@ -350,6 +356,7 @@ fn main() {
         if enabled.contains(&"view")
             || enabled.contains(&"kubernetes")
             || enabled.contains(&"proxyproto")
+            || enabled.contains(&"geoip")
         {
             code.push_str("if self.metadata.as_ref().is_some_and(|plugin| plugin.matches(cx)) { ");
             if enabled.contains(&"proxyproto") {
@@ -360,7 +367,12 @@ fn main() {
             }
             if enabled.contains(&"kubernetes") {
                 code.push_str(
-                    "if let Some(plugin) = &self.kubernetes { plugin.collect_metadata(cx); } ",
+                    "if let Some(plugin) = &self.kubernetes { plugin.collect_metadata(cx); }\n",
+                );
+            }
+            if enabled.contains(&"geoip") {
+                code.push_str(
+                    "if let Some(plugin) = &self.geoip { plugin.collect_metadata(cx); } ",
                 );
             }
             code.push_str("} ");

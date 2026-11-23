@@ -206,9 +206,9 @@ pub struct Metadata<'a> {
     inline_name: Option<&'static str>,
     inline_value: [u8; 64],
     inline_len: usize,
-    // shortcut: 12 copied labels and 1 KiB suffice for Kubernetes; expand for more providers.
-    copied: [Option<(&'static str, usize, usize)>; 12],
-    copied_data: [u8; 1024],
+    // shortcut: 16 copied labels and 1,280 bytes suffice for Kubernetes and geoip; expand for more providers.
+    copied: [Option<(&'static str, usize, usize)>; 16],
+    copied_data: [u8; 1280],
     copied_len: usize,
     validated_tsig: [u8; 255],
     validated_tsig_len: usize,
@@ -231,8 +231,8 @@ impl<'a> Metadata<'a> {
             inline_name: None,
             inline_value: [0; 64],
             inline_len: 0,
-            copied: [None; 12],
-            copied_data: [0; 1024],
+            copied: [None; 16],
+            copied_data: [0; 1280],
             copied_len: 0,
             validated_tsig: [0; 255],
             validated_tsig_len: 0,

@@ -28,6 +28,7 @@
 - The rewrite Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/rewrite`.
 - The autopath Plugin and tests follow CoreDNS v1.15.0's `plugin/autopath` and miekg/dns resolver configuration parsing.
 - The erratic Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/erratic` and miekg/dns transfer output.
+- The geoip Plugin and tests follow CoreDNS v1.15.0's `plugin/geoip`; the `GeoLite2-*.mmdb` fixtures in `crates/pharos-plugins/tests/fixtures/geoip` are copied from its `plugin/geoip/testdata` (Apache-2.0, generated with MaxMind's mmdbwriter from synthetic data, no MaxMind database content). The `Pharos-*.mmdb` fixtures there are generated from synthetic data with mmdb-writer 0.2.7 (MIT). Lookups use the `maxminddb` crate (ISC, Copyright Gregory J. Oschwald).
 - The whoami Plugin and tests follow CoreDNS v1.15.0's `plugin/whoami`.
 - The nsid Plugin, tests and differential scenario follow CoreDNS v1.15.0's `plugin/nsid`.
 - The bufsize Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/bufsize`.
