@@ -45,7 +45,7 @@ mod process_metrics;
 pub mod proxyproto;
 mod quic;
 mod quota;
-pub use admission::{Admission, admit, admit_with_update};
+pub use admission::{Admission, admit, admit_with_update, write_error};
 pub use lifecycle::{Lifecycle, Phase};
 pub use outcome::{TsigSigning, finish_outcome, finish_outcome_signed, response_limit};
 pub use panic::{contain_panic, panics_total};

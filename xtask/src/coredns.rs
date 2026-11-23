@@ -150,6 +150,8 @@ mod tests {
     use super::build_with;
 
     static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
+    // Linux execve: ETXTBSY if another thread's fork inherits a script's open write fd; serialize writes and spawns.
+    static SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct Fixture(PathBuf);
 
@@ -165,6 +167,7 @@ mod tests {
         }
 
         fn script(&self, name: &str, body: &str) -> PathBuf {
+            let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let path = self.0.join(name);
             fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -172,6 +175,7 @@ mod tests {
         }
 
         fn run(&self, git: &Path, go: &Path) -> Result<PathBuf, String> {
+            let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             build_with(
                 &self.0,
                 git.as_os_str(),

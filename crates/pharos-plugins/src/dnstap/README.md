@@ -1,0 +1,32 @@
+# dnstap
+
+[CoreDNS v1.15.0 README](https://github.com/coredns/coredns/blob/v1.15.0/plugin/dnstap/README.md)
+
+## dnstap
+
+- The default `version` is `Pharos-<crate version>`; CoreDNS uses `CoreDNS-1.15.0`. The default `identity` is the hostname, as in CoreDNS.
+- An endpoint URL (`tcp://`, `tls://`) is checked for control characters, spaces, unbalanced brackets and a non-numeric port only; Go's `net/url` also rejects some malformed percent-escapes, which Pharos accepts and fails at connect time.
+- Frame Streams is bidirectional (READY, ACCEPT, START; STOP, FINISH) on every transport and for dial and listen alike, as CoreDNS does through golang-framestream. Issue #188 describes unidirectional streams over TCP and TLS; that text differs from CoreDNS v1.15.0, and Pharos matches CoreDNS.
+- Each Directive owns a queue of `queue` x 10,000 messages. Queries never wait on a collector: when the queue is full, or no collector is connected, the message is dropped and counted, and "Dropped dnstap messages: N" is logged every 10 seconds.
+- A failed first connect is only logged; the writer keeps redialing. CoreDNS retries on a fixed 10 second tick; Pharos starts at 100 ms and doubles up to 10 s, and redials at once after a write error.
+- `listen` writes to every collector from one background task, not from the Query's own goroutine, so a slow collector never delays a Query. A collector whose write fails is closed alone. At most 64 Frame Streams handshakes are in flight at once; a collector connecting beyond that is closed at once (CoreDNS has no limit). The unix socket file is removed first thing on stop, as Go does on close, and every collector is closed concurrently, so a collector that never answers STOP cannot delay a reload's rebind or leave `pharos_dnstap_connected` above zero. With no collector connected, messages are not even encoded; each one is counted as a `no_connection` drop in the metric only (no 10 second warning, since an idle listener is normal), which CoreDNS does not count. Messages already queued when the last collector goes away are counted the same way when the task drains them.
+- `extra` placeholders expand per message from the Query; Response labels (`{rcode}`, `{rsize}`, `{duration}`, `{>rflags}`) are `-`, as in CoreDNS where the recorder is not yet set. `extra` is not expanded for messages a Plugin taps without a Context.
+- The Response tapped is what the Plugin Chain wrote, before the Server scrubs it (UDP truncation, TSIG signing). This matches CoreDNS, where the dnstap writer sits inside the Server's scrub writer.
+- `written` (`pharos_dnstap_messages_written_total`) counts frames handed to the buffered writer, not frames confirmed flushed. A failed flush loses the buffered frames without counting them, as in CoreDNS. Counting confirmed frames is deferred.
+- Known allocation exceptions on the Query path (deferred): payload slots are created lazily during warm-up, up to the queue capacity, so the first Queries after startup allocate; and a slot keeps at most 16 KiB, so a `full` message over 16 KiB (a TCP Response can be 65535 octets) allocates a buffer on the Query path each time, to bound memory.
+- `SocketProtocol` is UDP or TCP by the client's transport, also for TLS, HTTPS and QUIC, as CoreDNS derives it from the address type.
+- A Query answered after the chain returns (SERVFAIL, REFUSED, FORMERR, NOTIMP, NOTAUTH, or a Plugin error) still gets a CLIENT_RESPONSE (CoreDNS #6532). With `full` its wire message is the header-only Response the Server sends.
+- Metrics, all process-wide: `pharos_dnstap_messages_enqueued_total`, `pharos_dnstap_messages_dropped_total{reason="queue_full|no_connection|write_error"}`, `pharos_dnstap_messages_written_total`, `pharos_dnstap_connect_failures_total`, `pharos_dnstap_reconnects_total`, `pharos_dnstap_connected`.
+- `skipverify` on a dialer skips verification of the collector's certificate chain and name (handshake signatures are still checked); on a `tls://` listener with a CA it makes client certificates optional.
+- The Frame Streams writer buffers 16 KiB before writing; golang-framestream buffers 4 KiB. Frames are flushed every second as in CoreDNS.
+- `forward` taps its exchanges with the Upstream through the `dnstap` Directives of the same Server Block, as CoreDNS `plugin/forward/dnstap.go`: a FORWARDER_QUERY for each exchange, then a FORWARDER_RESPONSE when a reply came back. The messages are from this server's side: `query_address` is the socket toward the Upstream and `response_address` is the Upstream. The protocol follows the transport the exchange used (UDP and QUIC are UDP; TCP, TLS and HTTPS are TCP). An exchange that fails has no socket, so it has no `query_address` and its protocol is the one asked for (`force_tcp`, then `prefer_udp`, then the client's). `forward` does nothing for dnstap, not even read the clock, in a Server Block without a `dnstap` Directive. Another Plugin's `forward` is not tapped: only the Server Block's own `forward` is.
+- Another Plugin taps its own messages with `Dnstap::taps()`: each `Tap` is a clone sharing the Directive's queue, with `include_raw()` for `full`, `send` (no `extra` expansion) and `send_with` (expands `extra` from the Context). A message is built on the stack with `msg::Message` and encoded into a pooled slot, so a warm tap allocates nothing and never blocks. The Chain binds `forward` to the taps of its Server Block at setup; wire a new Plugin the same way in `lib.rs`.
+- Differential scenarios are skipped for every README example: the harness compares DNS Responses only, and the observable output of `dnstap` is a Frame Streams side channel that CoreDNS writes to a collector the harness does not run. Behaviour is pinned by the ported setup, message, writer and listener tests, and by `tests/functional/dnstap.rs`, which runs the Server against a local Frame Streams collector (unix, TCP and TLS, outgoing and `listen`), and by `tests/allocations/dnstap_allocations.rs`.
+
+## Sources
+
+- Derived from CoreDNS v1.15.0 plugin/dnstap/setup_test.go, msg/msg_test.go, io_test.go, listener_test.go and handler_test.go, and plugin/forward/dnstap.go.
+
+- [CoreDNS v1.15.0 `plugin/dnstap`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/dnstap)
+- [dnstap.proto](https://github.com/dnstap/dnstap.pb/blob/main/dnstap.proto)
+- [Frame Streams (fstrm)](https://farsightsec.github.io/fstrm/) and [golang-framestream v0.3.0](https://github.com/farsightsec/golang-framestream)

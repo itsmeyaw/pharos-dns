@@ -62,6 +62,7 @@
 - The bind Plugin and tests follow CoreDNS v1.15.0's `plugin/bind`.
 - Multisocket setup and tests follow CoreDNS v1.15.0's `plugin/multisocket` and `core/dnsserver/register.go`.
 - The log Plugin, formatter and tests follow CoreDNS v1.15.0's `plugin/log`, `plugin/pkg/replacer` and `plugin/pkg/response`.
+- The dnstap Plugin, setup parsing and tests follow CoreDNS v1.15.0's `plugin/dnstap` (`setup.go`, `setup_test.go`, `msg/msg.go`, `msg/msg_test.go`, `io.go`, `io_test.go`, `listener.go`, `listener_test.go`, `handler.go`, `handler_test.go`, `encoder.go`), and the forward Plugin's dnstap emission follows `plugin/forward/dnstap.go`.
 - The metadata Plugin and tests follow CoreDNS v1.15.0's `plugin/metadata` and `plugin/kubernetes/metadata_test.go`.
 - The template engine tests follow CoreDNS v1.15.0's `plugin/template`.
 - The expression engine and tests follow CoreDNS v1.15.0's `plugin/pkg/expression`, `plugin/view` and `plugin/template`.
@@ -297,6 +298,20 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+## golang-dnstap
+
+- Source: https://github.com/dnstap/golang-dnstap and https://github.com/dnstap/dnstap.pb
+- License: Apache-2.0
+- Copyright (c) 2013-2014 by Farsight Security, Inc.
+- The dnstap protobuf encoding in `crates/pharos-plugins/src/dnstap/msg.rs` follows `dnstap.proto` and golang-dnstap v0.4.0's generated `dnstap.pb.go`.
+
+## golang-framestream
+
+- Source: https://github.com/farsightsec/golang-framestream and https://github.com/farsightsec/fstrm
+- License: Apache-2.0 (golang-framestream) and MIT (fstrm)
+- Copyright (c) 2014 by Farsight Security, Inc.
+- The Frame Streams encoder and its tests in `crates/pharos-plugins/src/dnstap/framestream.rs` follow golang-framestream v0.3.0's `Writer.go`, `Control.go` and `timeout.go` and the fstrm `control.h` wire format.
 
 ## NLnet Labs domain
 

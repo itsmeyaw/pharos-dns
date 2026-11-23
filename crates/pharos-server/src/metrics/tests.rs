@@ -383,3 +383,40 @@ fn trace_series_appear_once_the_plugin_registers() {
         "{out}"
     );
 }
+
+#[test]
+fn dnstap_metrics_appear_once_resolved_and_count_by_reason() {
+    use super::{DnstapDrop, Registry};
+
+    let registry = Registry::default();
+    let mut text = String::new();
+    registry.encode(&mut text);
+    assert!(!text.contains("pharos_dnstap_"));
+
+    let metrics = registry.dnstap();
+    metrics.enqueued();
+    metrics.enqueued();
+    metrics.dropped(DnstapDrop::QueueFull, 3);
+    metrics.dropped(DnstapDrop::WriteError, 1);
+    metrics.written(2);
+    metrics.connect_failure();
+    metrics.reconnect();
+    metrics.connected();
+    metrics.connected();
+    metrics.disconnected();
+    text.clear();
+    registry.encode(&mut text);
+    for line in [
+        "pharos_dnstap_messages_enqueued_total 2",
+        "pharos_dnstap_messages_written_total 2",
+        "pharos_dnstap_connect_failures_total 1",
+        "pharos_dnstap_reconnects_total 1",
+        "pharos_dnstap_messages_dropped_total{reason=\"queue_full\"} 3",
+        "pharos_dnstap_messages_dropped_total{reason=\"no_connection\"} 0",
+        "pharos_dnstap_messages_dropped_total{reason=\"write_error\"} 1",
+        "pharos_dnstap_connected 1",
+        "# TYPE pharos_dnstap_connected gauge",
+    ] {
+        assert!(text.lines().any(|l| l == line), "{line}\n{text}");
+    }
+}

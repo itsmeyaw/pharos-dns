@@ -126,6 +126,8 @@ pub mod zone;
 #[cfg(all(test, feature = "plugin-cache", feature = "plugin-hosts"))]
 mod self_lookup_test;
 
+#[cfg(feature = "plugin-dnstap")]
+pub mod dnstap;
 #[cfg(feature = "plugin-forward")]
 pub mod forward;
 #[cfg(feature = "plugin-geoip")]
@@ -524,6 +526,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("debug", include_str!("debug/README.md")),
     ("dns64", include_str!("dns64/README.md")),
     ("dnssec", include_str!("dnssec/README.md")),
+    ("dnstap", include_str!("dnstap/README.md")),
     ("dynupdate", include_str!("dynupdate/README.md")),
     ("errors", include_str!("errors/README.md")),
     ("erratic", include_str!("erratic/README.md")),
@@ -744,6 +747,15 @@ pub fn servers_with_registry(
         #[cfg(feature = "plugin-trace")]
         if let Some(trace) = &block.config.trace {
             trace.set_metrics(&metrics);
+        }
+
+        #[cfg(feature = "plugin-dnstap")]
+        if let Some(dnstap) = &block.config.dnstap {
+            dnstap.set_metrics(&metrics);
+        }
+        #[cfg(all(feature = "plugin-forward", feature = "plugin-dnstap"))]
+        if let (Some(forward), Some(dnstap)) = (&mut block.config.forward, &block.config.dnstap) {
+            forward.set_taps(dnstap.taps());
         }
         #[cfg(feature = "plugin-kubernetes")]
         if let Some(kubernetes) = &block.config.kubernetes {

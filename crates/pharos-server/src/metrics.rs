@@ -9,10 +9,12 @@ use std::{
     },
 };
 
+mod dnstap;
 mod grpc;
 mod kubernetes;
 mod template;
 mod trace;
+pub use dnstap::{DnstapDrop, DnstapMetrics};
 pub use grpc::GrpcMetrics;
 pub use kubernetes::{KubernetesMetrics, KubernetesRequestMetrics};
 pub use template::{TemplateFailureMetrics, TemplateMetrics};
@@ -90,6 +92,7 @@ struct RegistryInner {
     template: template::TemplateRegistry,
     grpc: grpc::GrpcRegistry,
     trace: Arc<trace::TraceCounters>,
+    dnstap: dnstap::DnstapRegistry,
 }
 
 #[derive(Default)]
@@ -653,6 +656,7 @@ impl Registry {
             template: template::TemplateRegistry::default(),
             grpc: grpc::GrpcRegistry::default(),
             trace: Arc::default(),
+            dnstap: dnstap::DnstapRegistry::default(),
         }))
     }
 
@@ -808,6 +812,11 @@ impl Registry {
         TraceMetrics::shared(&self.0.trace)
     }
 
+    /// Register and share the process-wide dnstap counters.
+    pub fn dnstap(&self) -> DnstapMetrics {
+        self.0.dnstap.resolve()
+    }
+
     /// Register and share forward's unlabelled counters.
     pub fn forward(&self) -> ForwardMetrics {
         self.0.forward_enabled.store(true, Ordering::Relaxed);
@@ -870,6 +879,7 @@ impl Registry {
         self.0.template.encode(out);
         self.0.grpc.encode(out);
         self.0.trace.encode(out);
+        self.0.dnstap.encode(out);
         let shed = self.0.shed.lock().unwrap();
         if !shed.is_empty() {
             header(
