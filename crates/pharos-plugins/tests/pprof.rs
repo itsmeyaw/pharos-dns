@@ -1,4 +1,5 @@
 #![cfg(feature = "plugin-pprof")]
+#![recursion_limit = "512"]
 
 use std::{net::SocketAddr, time::Duration};
 
@@ -7,6 +8,7 @@ use pharos_plugins::{Chain, directives, servers};
 use pharos_server::{Action, Handler, Lifecycle, Phase, Protocol};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+// SIGPROF is process-wide: its sampler unwinds whichever thread it hits, so these tests run in their own binary, away from the TLS, QUIC and crypto tests of `functional`.
 /// The CPU profiler is process-wide, so tests that start one must not overlap.
 static PROFILER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 

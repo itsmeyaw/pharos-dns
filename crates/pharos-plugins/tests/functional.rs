@@ -315,8 +315,6 @@ mod trace {
 
 #[path = "functional"]
 mod pprof {
-    #[path = "pprof.rs"]
-    mod cases;
     #[path = "pprof_setup.rs"]
     mod pprof_setup;
 }
