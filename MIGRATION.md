@@ -36,7 +36,8 @@ or credentials that are checked at Startup. It returns 0 on success, 1 for a
 configuration error, and 2 for an invalid flag.
 
 For `key aws_secretsmanager`, Plugin setup retrieves the secret, so `check`
-requires AWS connectivity and credentials.
+requires AWS connectivity and credentials. The same holds for `route53`, whose
+first load of the hosted zones runs at setup.
 
 With the `kubernetes` option `multicluster`, the ServiceImport CRD
 (`serviceimports.multicluster.x-k8s.io`) must be installed and readable by the

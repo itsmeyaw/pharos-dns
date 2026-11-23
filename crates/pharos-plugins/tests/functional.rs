@@ -17,6 +17,10 @@ mod auto;
 #[path = "functional/file.rs"]
 mod file;
 
+#[cfg(feature = "plugin-route53")]
+#[path = "functional/route53.rs"]
+mod route53;
+
 #[cfg(feature = "plugin-file")]
 #[path = "functional/file_coredns.rs"]
 mod file_coredns;

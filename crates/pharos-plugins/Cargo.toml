@@ -20,6 +20,8 @@ pharos-server = { version = "0.3.0", path = "../pharos-server" }
 pharos-dnssec = { version = "0.3.0", path = "../pharos-dnssec", optional = true }
 pharos-kubernetes = { version = "0.3.0", path = "../pharos-kubernetes", optional = true }
 aws-config = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "credentials-process", "sso"], optional = true }
+aws-runtime = { version = "1", default-features = false, optional = true }
+aws-sdk-route53 = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
 aws-sdk-secretsmanager = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_yaml_ng = { version = "0.10", optional = true }
@@ -93,6 +95,7 @@ default = [
     "plugin-ready",
     "plugin-reload",
     "plugin-rewrite",
+    "plugin-route53",
     "plugin-secondary",
     "plugin-sign",
     "plugin-template",
@@ -147,7 +150,7 @@ plugin-template = ["dep:regex"]
 plugin-transfer = []
 plugin-dynupdate = []
 plugin-hosts = []
-plugin-route53 = []
+plugin-route53 = ["dep:aws-config", "dep:aws-runtime", "dep:aws-sdk-route53"]
 plugin-azure = []
 plugin-clouddns = []
 plugin-k8s-external = ["plugin-kubernetes"]

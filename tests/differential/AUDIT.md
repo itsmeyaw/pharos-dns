@@ -82,3 +82,4 @@ header.
 | forward: `quic://`; `https://` | `forward-readme-doq`; `forward-readme-doh` |
 | forward: `%` per-endpoint server name | `forward-readme-dot-sni`; `forward-readme-doq-sni` |
 | forward: DoT Server Blocks with different `tls_servername` | Skipped: the fixture certificate has one name; `forward-readme-dot-sni` covers per-endpoint names. |
+| route53: every README example | Skipped: needs live AWS credentials and Route 53 hosted zones; `route53::` functional tests run against a local Route 53 stub instead. |

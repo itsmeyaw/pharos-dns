@@ -76,7 +76,8 @@ pub mod header;
     feature = "plugin-cancel",
     feature = "plugin-timeouts",
     feature = "plugin-erratic",
-    feature = "plugin-trace"
+    feature = "plugin-trace",
+    feature = "plugin-route53"
 ))]
 pub mod health;
 #[cfg(feature = "plugin-hosts")]
@@ -107,6 +108,8 @@ mod regex_match;
 pub mod rewrite;
 #[cfg(any(feature = "plugin-dns64", feature = "plugin-siit"))]
 mod rfc6052;
+#[cfg(feature = "plugin-route53")]
+pub mod route53;
 #[cfg(feature = "plugin-secondary")]
 pub mod secondary;
 mod serial;
@@ -119,7 +122,8 @@ pub mod siit;
     feature = "plugin-secondary",
     feature = "plugin-auto",
     feature = "plugin-sign",
-    feature = "plugin-dynupdate"
+    feature = "plugin-dynupdate",
+    feature = "plugin-route53"
 ))]
 pub mod zone;
 
@@ -559,6 +563,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("ready", include_str!("ready/README.md")),
     ("reload", include_str!("reload/README.md")),
     ("rewrite", include_str!("rewrite/README.md")),
+    ("route53", include_str!("route53/README.md")),
     ("siit", include_str!("siit/README.md")),
     ("sign", include_str!("sign/README.md")),
     ("root", include_str!("root/README.md")),
