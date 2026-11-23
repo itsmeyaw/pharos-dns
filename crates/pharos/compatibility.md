@@ -94,6 +94,18 @@
 
 - [erratic Plugin notes](../crates/pharos-plugins/src/erratic/README.md)
 
+## etcd
+
+- [etcd Plugin notes](../crates/pharos-plugins/src/etcd/README.md)
+- Pharos reads etcd through a bounded view that a watch on the key prefix keeps current; CoreDNS reads etcd on every Query and never watches. A write is visible once its watch event arrives (typically milliseconds), a lease TTL in an answer can be up to five seconds stale, and while the watch is down every Query reads etcd as CoreDNS does. Only the etcd v3 gRPC API is used, never the JSON gateway.
+- A failed endpoint is tried last for one second, and the endpoints share the five second call time (CoreDNS `etcdTimeout`), which also covers the lease lookups of one read; an etcd that cannot be read is SERVFAIL.
+- The `etcd` Directive is allowed once per Server Block, where CoreDNS accepts several. `unix:` and other non-HTTP etcd endpoints are rejected at setup. A missing endpoint port is 443, as in grpc-go.
+- JSON syntax error messages and the handling of invalid UTF-8 in a Service value differ from Go's `encoding/json`; JSON nesting deeper than 128 levels is an error.
+- A service whose `host` is not a valid domain name is skipped where CoreDNS fails to pack the Response; loop and duplicate checks compare names ignoring case; a Response that does not fit drops the records that do not fit and sets TC where CoreDNS lets the Server truncate it; the lookup of a target outside the zones fails where Self Lookup is unavailable or nested ten deep.
+- `Domain` of a key too short to hold a name is the root where CoreDNS panics.
+- Differential scenarios are skipped: they need a real etcd server.
+- The warm path allocates nothing in Pharos for A, AAAA, TXT, CNAME, PTR, MX, SRV, SOA, NODATA and NXDOMAIN; a host that is a name (CNAME chain), a wildcard name, a large set of services (over 64, or over 16 for SRV and MX) or a `group` takes an allocating path with the same answers; see the Plugin notes.
+
 ## file
 
 - [file Plugin notes](../crates/pharos-plugins/src/file/README.md)
@@ -319,7 +331,7 @@
 - CoreDNS v1.15.0's `plugin.SplitHostPort` caps server-block key presentation at 255 bytes before DNS wire-length validation (`plugin/normalize.go`, `core/dnsserver/register.go`). Pharos preserves this under ADR 0003 (CoreDNS wins), so some RFC 1035 §2.3.4-valid escaped names with longer presentation remain rejected.
 - CoreDNS v1.15.0 normalizes server-block names with Go 1.26.0 `strings.ToLower` and rejects IPv6 CIDRs beginning with `:` or `0` followed by `:` (`plugin/normalize.go`). Pharos preserves those Corefile behaviors under ADR 0003 (CoreDNS wins), despite RFC 4343 §3 and RFC 4291 §2.3. Pharos writes non-ASCII UTF-8 octets in normalized key text as RFC 4343 `\DDD` escapes so the ASCII DNS presentation parser can consume them; wire labels remain the same octets.
 - CoreDNS v1.15.0's caddy v1.1.4 import parser rejects patterns with multiple `*` or `?` wildcards and all bracket expressions (`caddyfile/parse.go`); Pharos preserves those limits under ADR 0003 (CoreDNS wins).
-- Only `root`, `cancel`, `timeouts`, `debug`, `shed`, `acl`, `any`, `auto`, `autopath`, `azure`, `bind`, `bufsize`, `cache`, `chaos`, `clouddns`, `dns64`, `dnssec`, `dnstap`, `errors`, `erratic`, `file`, `forward`, `geoip`, `header`, `health`, `hosts`, `https`, `https3`, `k8s_external`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `metadata`, `minimal`, `multisocket`, `nsid`, `pprof`, `prometheus`, `proxyproto`, `quic`, `ready`, `reload`, `rewrite`, `route53`, `secondary`, `siit`, `sign`, `template`, `tls`, `trace`, `transfer`, `tsig`, `view` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
+- Only `root`, `cancel`, `timeouts`, `debug`, `shed`, `acl`, `any`, `auto`, `autopath`, `azure`, `bind`, `bufsize`, `cache`, `chaos`, `clouddns`, `dns64`, `dnssec`, `dnstap`, `errors`, `erratic`, `etcd`, `file`, `forward`, `geoip`, `header`, `health`, `hosts`, `https`, `https3`, `k8s_external`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `metadata`, `minimal`, `multisocket`, `nsid`, `pprof`, `prometheus`, `proxyproto`, `quic`, `ready`, `reload`, `rewrite`, `route53`, `secondary`, `siit`, `sign`, `template`, `tls`, `trace`, `transfer`, `tsig`, `view` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 - A first Zone record with an omitted owner is rejected: miekg/dns accepts it with an empty owner, which cannot be encoded as a valid DNS name without inventing one.
 - Zone records whose parsed data cannot be encoded on the wire are rejected. miekg/dns can accept such records during parsing, including invalid base64, duplicate SVCB keys and RDATA over 65,535 octets, but then fails to pack them.

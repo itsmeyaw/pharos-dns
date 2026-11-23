@@ -58,6 +58,8 @@ pub mod dynupdate;
 pub mod erratic;
 #[cfg(feature = "plugin-errors")]
 pub mod errors;
+#[cfg(feature = "plugin-etcd")]
+pub mod etcd;
 pub mod expression;
 #[cfg(feature = "plugin-file")]
 pub mod file;
@@ -544,6 +546,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("dynupdate", include_str!("dynupdate/README.md")),
     ("errors", include_str!("errors/README.md")),
     ("erratic", include_str!("erratic/README.md")),
+    ("etcd", include_str!("etcd/README.md")),
     ("file", include_str!("file/README.md")),
     ("auto", include_str!("auto/README.md")),
     ("secondary", include_str!("secondary/README.md")),
@@ -1010,6 +1013,16 @@ pub fn servers_with_registry(
                 Ok(())
             });
         }
+        #[cfg(feature = "plugin-etcd")]
+        if chain.etcd.is_some() {
+            let chain = Arc::clone(&chain);
+            lifecycle.register_sync(pharos_server::Phase::Shutdown, move || {
+                if let Some(etcd) = &chain.etcd {
+                    etcd.stop();
+                }
+                Ok(())
+            });
+        }
         #[cfg(feature = "plugin-ready")]
         if chain.ready.is_some() {
             chain.collect_readiness(&ready_state);
@@ -1441,6 +1454,7 @@ impl pharos_server::Plugin for Unimplemented {
     feature = "plugin-sign",
     feature = "plugin-forward",
     feature = "plugin-grpc",
+    feature = "plugin-etcd",
     feature = "plugin-tls"
 ))]
 fn root_path(chain: &Chain) -> Option<&std::path::Path> {
@@ -1466,6 +1480,7 @@ fn root_path(chain: &Chain) -> Option<&std::path::Path> {
     feature = "plugin-sign",
     feature = "plugin-forward",
     feature = "plugin-grpc",
+    feature = "plugin-etcd",
     feature = "plugin-tls"
 ))]
 fn resolve_path(path: std::path::PathBuf, root: Option<&std::path::Path>) -> std::path::PathBuf {
@@ -1495,7 +1510,11 @@ fn resolve_path(path: std::path::PathBuf, root: Option<&std::path::Path>) -> std
 }
 
 // CoreDNS v1.15.0 plugin/pkg/tls/tls.go NewTLSConfigFromArgs: `CA`, `CERT KEY` or `CERT KEY CA`, and no arguments for the system roots.
-#[cfg(any(feature = "plugin-forward", feature = "plugin-grpc"))]
+#[cfg(any(
+    feature = "plugin-forward",
+    feature = "plugin-grpc",
+    feature = "plugin-etcd"
+))]
 fn tls_client_from_args(
     args: &[String],
     root: Option<&std::path::Path>,

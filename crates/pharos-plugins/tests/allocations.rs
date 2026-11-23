@@ -11,6 +11,13 @@ use std::{
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 static SERIAL: Mutex<()> = Mutex::new(());
 
+#[cfg(feature = "plugin-etcd")]
+#[path = "allocations"]
+mod etcd {
+    #[path = "etcd_allocations.rs"]
+    mod etcd_allocations;
+}
+
 #[cfg(feature = "plugin-k8s-external")]
 #[path = "allocations"]
 mod k8s_external {

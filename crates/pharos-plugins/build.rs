@@ -137,6 +137,7 @@ fn main() {
             "sign" => "sign::Sign",
             "erratic" => "erratic::Erratic",
             "trace" => "trace::Trace",
+            "etcd" => "etcd::Etcd",
             _ => "Unimplemented",
         };
         writeln!(code, "pub r#{name}: Option<{ty}>,").unwrap();
@@ -206,6 +207,7 @@ fn main() {
             "sign" => "sign::setup::setup",
             "erratic" => "erratic::setup::setup",
             "trace" => "trace::setup::setup",
+            "etcd" => "etcd::setup::setup",
             "kubernetes" => "kubernetes::setup::setup",
             _ => "setup_unimplemented",
         };
@@ -230,6 +232,7 @@ fn main() {
                 | "quic"
                 | "https3"
                 | "grpc"
+                | "etcd"
                 | "proxyproto"
         );
         writeln!(
