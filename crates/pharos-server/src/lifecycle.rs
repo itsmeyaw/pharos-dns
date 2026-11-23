@@ -8,6 +8,8 @@ pub enum Phase {
     Startup,
     /// Listeners have been installed after Startup, including on Reload.
     Started,
+    /// The previous instance has stopped (its Shutdown hooks ran, on Reload) and this one is the live instance.
+    InstanceStartup,
     Shutdown,
     Restart,
     RestartFailed,

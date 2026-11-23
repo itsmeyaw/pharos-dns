@@ -110,6 +110,8 @@ pub mod minimal;
 pub mod multisocket;
 #[cfg(feature = "plugin-nsid")]
 pub mod nsid;
+#[cfg(feature = "plugin-on")]
+pub mod on;
 pub mod proxy;
 mod regex_match;
 #[cfg(feature = "plugin-rewrite")]
@@ -570,6 +572,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("multisocket", include_str!("multisocket/README.md")),
     ("nsid", include_str!("nsid/README.md")),
     ("pprof", include_str!("pprof/README.md")),
+    ("on", include_str!("on/README.md")),
     ("prometheus", include_str!("prometheus/README.md")),
     ("proxyproto", include_str!("proxyproto/README.md")),
     ("quic", include_str!("quic/README.md")),
