@@ -1,7 +1,6 @@
 use super::{Api, Config, Page, RecordSet, StartRecord};
 use aws_config::BehaviorVersion;
-#[allow(deprecated)]
-use aws_config::profile::profile_file::{ProfileFileKind, ProfileFiles};
+use aws_runtime::env_config::file::{EnvConfigFileKind, EnvConfigFiles};
 use aws_sdk_route53::{
     config::{Builder, Credentials},
     error::ProvideErrorMetadata,
@@ -30,13 +29,9 @@ pub(super) async fn connect(config: &Config) -> Result<Sdk, String> {
     }
     // CoreDNS v1.15.0 plugin/route53/setup.go setup: WithSharedConfigFiles replaces the config files only; the credentials file stays the default.
     if let Some(files) = &config.shared_config_files {
-        #[allow(deprecated)]
-        let mut profile_files = ProfileFiles::builder().include_default_credentials_file(true);
+        let mut profile_files = EnvConfigFiles::builder().include_default_credentials_file(true);
         for file in files {
-            #[allow(deprecated)]
-            {
-                profile_files = profile_files.with_file(ProfileFileKind::Config, file);
-            }
+            profile_files = profile_files.with_file(EnvConfigFileKind::Config, file);
         }
         loader = loader.profile_files(profile_files.build());
     }

@@ -2589,6 +2589,7 @@ dependencies = [
  "arc-swap",
  "aws-config",
  "aws-lc-rs",
+ "aws-runtime",
  "aws-sdk-route53",
  "aws-sdk-secretsmanager",
  "base64 0.22.1",
