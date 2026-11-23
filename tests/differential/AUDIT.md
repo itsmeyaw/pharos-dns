@@ -16,6 +16,7 @@ independent Corefile examples. Skipped entries explain why they cannot run.
 | nsid: explicit string | `nsid` |
 | bufsize: forward; file | `bufsize-forward`; `bufsize-file-readme` |
 | debug: default | `debug` |
+| pprof: default; alternate address; `block` | Skipped: the harness compares DNS Responses only, and `/debug/pprof` serves per-process HTTP profiles (CoreDNS emits Go profiles Pharos has no counterpart for). Setup and endpoints are covered by `crates/pharos-plugins/tests/functional/pprof_setup.rs` and `crates/pharos-plugins/tests/pprof.rs`. |
 | shed: forward | `shed` |
 | local: default | `local-readme` |
 | dns64: default; prefix argument; prefix block; translate_all; allow_ipv4 | `dns64-default`; `dns64-prefix`; `dns64-prefix-block`; `dns64-translate-all`; `dns64-allow-ipv4` |

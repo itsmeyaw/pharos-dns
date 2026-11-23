@@ -18,6 +18,7 @@ fn config_only(name: &str) -> bool {
             | "proxyproto"
             | "ready"
             | "health"
+            | "pprof"
             | "reload"
             | "view"
             | "sign"
@@ -117,6 +118,7 @@ fn main() {
             "ready" => "ready::Ready",
             "forward" => "forward::Forward",
             "health" => "health::Health",
+            "pprof" => "pprof::Pprof",
             "hosts" => "hosts::Hosts",
             "k8s_external" => "k8s_external::External",
             "kubernetes" => "kubernetes::Kubernetes",
@@ -182,6 +184,7 @@ fn main() {
             "ready" => "ready::setup::setup",
             "forward" => "forward::setup::setup",
             "health" => "health::setup::setup",
+            "pprof" => "pprof::setup::setup",
             "hosts" => "hosts::setup::setup",
             "k8s_external" => "k8s_external::setup::setup",
             "loadbalance" => "loadbalance::setup::setup",
@@ -208,6 +211,7 @@ fn main() {
                 | "metadata"
                 | "prometheus"
                 | "ready"
+                | "pprof"
                 | "errors"
                 | "reload"
                 | "hosts"

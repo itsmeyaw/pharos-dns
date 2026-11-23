@@ -31,6 +31,7 @@ maxminddb = { version = "0.33", optional = true }
 aws-lc-rs = { version = "1", optional = true }
 base64 = { version = "0.22", optional = true }
 nix = { version = "0.31", features = ["net", "socket", "hostname"] }
+pprof = { version = "0.15", default-features = false, features = ["protobuf-codec"], optional = true }
 
 [dev-dependencies]
 aws-lc-rs = "1"
@@ -84,6 +85,7 @@ default = [
     "plugin-minimal",
     "plugin-multisocket",
     "plugin-nsid",
+    "plugin-pprof",
     "plugin-prometheus",
     "plugin-proxyproto",
     "plugin-quic",
@@ -118,7 +120,7 @@ plugin-debug = []
 plugin-trace = []
 plugin-ready = []
 plugin-health = []
-plugin-pprof = []
+plugin-pprof = ["dep:pprof"]
 plugin-shed = []
 plugin-prometheus = ["dep:serde", "dep:serde_yaml_ng"]
 plugin-errors = ["dep:regex"]

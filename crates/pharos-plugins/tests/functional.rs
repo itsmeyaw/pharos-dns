@@ -314,6 +314,12 @@ mod trace {
 }
 
 #[path = "functional"]
+mod pprof {
+    #[path = "pprof_setup.rs"]
+    mod pprof_setup;
+}
+
+#[path = "functional"]
 mod prometheus {
     #[path = "prometheus.rs"]
     mod cases;
