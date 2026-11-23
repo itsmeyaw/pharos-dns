@@ -385,6 +385,56 @@ fn trace_series_appear_once_the_plugin_registers() {
 }
 
 #[test]
+fn nomad_metrics_export_only_used_series_with_coredns_labels_and_help() {
+    let registry = super::Registry::new("test", "test", "test");
+    let metrics = registry.nomad("dns://:53");
+    let same = registry.nomad("dns://:53");
+    let other = registry.nomad("dns://:54");
+    let mut out = String::new();
+    registry.encode(&mut out);
+    assert!(!out.contains("pharos_nomad_"));
+
+    metrics.success(b"default");
+    same.success(b"default");
+    metrics.failure(b"default");
+    other.failure(b"prod");
+    out.clear();
+    registry.encode(&mut out);
+    for expected in [
+        "# HELP pharos_nomad_success_requests_total Counter of DNS requests handled successfully.",
+        "# TYPE pharos_nomad_success_requests_total counter",
+        "# HELP pharos_nomad_failed_requests_total Counter of DNS requests failed.",
+        "# TYPE pharos_nomad_failed_requests_total counter",
+        "pharos_nomad_success_requests_total{namespace=\"default\",server=\"dns://:53\"} 2",
+        "pharos_nomad_failed_requests_total{namespace=\"default\",server=\"dns://:53\"} 1",
+        "pharos_nomad_failed_requests_total{namespace=\"prod\",server=\"dns://:54\"} 1",
+    ] {
+        assert!(
+            out.lines().any(|line| line == expected),
+            "missing {expected}\n{out}"
+        );
+    }
+    assert_eq!(
+        out.matches("pharos_nomad_success_requests_total{").count(),
+        1
+    );
+}
+
+#[test]
+fn nomad_namespace_labels_are_presentation_text() {
+    let registry = super::Registry::new("test", "test", "test");
+    let metrics = registry.nomad("s");
+    metrics.success(b"a.b\"\\\n\xff");
+    let mut out = String::new();
+    registry.encode(&mut out);
+    // RFC 4343 §2.1 escapes the dot, quote and backslash; the exporter then escapes `\` and `"` itself.
+    assert!(
+        out.contains(r#"namespace="a\\.b\\\"\\\\\\010\\255""#),
+        "{out}"
+    );
+}
+
+#[test]
 fn dnstap_metrics_appear_once_resolved_and_count_by_reason() {
     use super::{DnstapDrop, Registry};
 
@@ -419,4 +469,78 @@ fn dnstap_metrics_appear_once_resolved_and_count_by_reason() {
     ] {
         assert!(text.lines().any(|l| l == line), "{line}\n{text}");
     }
+}
+
+#[test]
+fn nomad_namespace_cardinality_is_capped_per_server() {
+    let registry = super::Registry::new("test", "test", "test");
+    let metrics = registry.nomad("s");
+    for index in 0..200 {
+        metrics.failure(format!("ns{index}").as_bytes());
+    }
+    // A namespace admitted before the cap keeps counting under its own label.
+    metrics.failure(b"ns0");
+    let mut out = String::new();
+    registry.encode(&mut out);
+    let series = out
+        .lines()
+        .filter(|line| line.starts_with("pharos_nomad_failed_requests_total{"))
+        .count();
+    assert_eq!(series, 65, "{out}");
+    assert!(
+        out.contains("pharos_nomad_failed_requests_total{namespace=\"_other\",server=\"s\"} 136")
+    );
+    assert!(out.contains("pharos_nomad_failed_requests_total{namespace=\"ns0\",server=\"s\"} 2"));
+    // Another server has a cap of its own.
+    registry.nomad("t").failure(b"fresh");
+    out.clear();
+    registry.encode(&mut out);
+    assert!(out.contains("namespace=\"fresh\",server=\"t\""));
+}
+
+// A Query namespace spelled like the overflow label must not give two series with identical labels.
+#[test]
+fn nomad_namespace_named_like_the_overflow_label_shares_its_series() {
+    let registry = super::Registry::new("test", "test", "test");
+    let metrics = registry.nomad("s");
+    metrics.failure(b"_other");
+    for index in 0..64 {
+        metrics.failure(format!("ns{index}").as_bytes());
+    }
+    metrics.failure(b"over");
+    metrics.failure(b"_other");
+    let mut out = String::new();
+    registry.encode(&mut out);
+    let others = out
+        .lines()
+        .filter(|line| line.contains("namespace=\"_other\""))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        others,
+        ["pharos_nomad_failed_requests_total{namespace=\"_other\",server=\"s\"} 3"]
+    );
+}
+
+#[test]
+fn nomad_counters_do_not_lose_concurrent_increments() {
+    let registry = super::Registry::new("test", "test", "test");
+    let metrics = registry.nomad("s");
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            let metrics = metrics.clone();
+            scope.spawn(move || {
+                for index in 0..100 {
+                    metrics.success(format!("ns{}", index % 100).as_bytes());
+                }
+            });
+        }
+    });
+    let mut out = String::new();
+    registry.encode(&mut out);
+    let total: u64 = out
+        .lines()
+        .filter(|line| line.starts_with("pharos_nomad_success_requests_total{"))
+        .map(|line| line.rsplit(' ').next().unwrap().parse::<u64>().unwrap())
+        .sum();
+    assert_eq!(total, 800);
 }

@@ -75,6 +75,7 @@ header.
 | https3: `max_streams`; `0` | `https3-readme-streams`; `https3-readme-default`; `https3-basic` |
 | grpc_server: `max_streams`, `max_connections`; unbounded `0` | `grpc-server-readme-limits`; `grpc-server-readme-unbounded` |
 | grpc: zone; balance; except; resolv.conf; TLS; fallthrough | `grpc-readme-zone`; `grpc-readme-balance`; `grpc-readme-except`; `grpc-readme-resolv`; `grpc-readme-tls` and `grpc-readme-multi-tls`; `grpc-readme-fallthrough` |
+| nomad: README examples | Skipped: the harness starts a fixture only for `kubernetes-*`; a Nomad scenario needs a fake Nomad API shared by CoreDNS and Pharos. Pinned by `tests/functional/nomad.rs` instead. |
 | proxyproto: default; `allow`; `default reject`; `udp_session_tracking`; with max sessions; `tlv_metadata` | `proxyproto-readme-default`; `proxyproto-readme-allow`; `proxyproto-readme-reject`; `proxyproto-readme-session`; `proxyproto-readme-session-max`; `proxyproto-readme-tlv` |
 | proxyproto: sources that are allowed | The README `allow` ranges exclude loopback, so `proxyproto-allow-loopback`, `proxyproto-session-loopback`, `proxyproto-tlv-loopback` and `proxyproto-client-ip` allow 127.0.0.1 to exercise the header; `proxyproto-reject-loopback` rejects it. |
 | proxyproto: DoT, DoH and gRPC | `proxyproto-tls`; `proxyproto-https`; `proxyproto-grpc` |

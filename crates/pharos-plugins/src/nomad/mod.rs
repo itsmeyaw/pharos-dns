@@ -1,0 +1,262 @@
+//! Serve A, AAAA and SRV records for services registered with Nomad.
+
+mod client;
+mod escape;
+mod ready;
+mod registration;
+mod response;
+pub(crate) mod setup;
+#[cfg(test)]
+mod stub;
+
+use pharos_proto::{Class, Name, NameRef, Opcode};
+use std::{net::SocketAddr, sync::Arc};
+
+use pharos_server::{Context, Next, Outcome, Plugin, Protocol, Readiness, metrics::NomadMetrics};
+
+use client::{Client, Options};
+use ready::Health;
+use response::Reply;
+
+/// CoreDNS v1.15.0 plugin/nomad/nomad.go `defaultTTL`: seconds a Response record lives unless `ttl` says otherwise.
+const DEFAULT_TTL: u32 = 30;
+const DEFAULT_ADDRESS: &str = "http://127.0.0.1:4646";
+
+/// CoreDNS v1.15.0 plugin/nomad/setup.go `parse`: the values one `nomad` Directive configures.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct Settings {
+    pub(crate) zone: String,
+    pub(crate) ttl: u32,
+    pub(crate) filter: String,
+    pub(crate) token: Option<String>,
+    pub(crate) addresses: Vec<String>,
+}
+
+// The token stays out of Debug output.
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Settings")
+            .field("zone", &self.zone)
+            .field("ttl", &self.ttl)
+            .field("filter", &self.filter)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("addresses", &self.addresses)
+            .finish()
+    }
+}
+
+/// One `nomad` Directive, followed by any later ones of the Server Block.
+#[derive(Debug)]
+pub struct Nomad {
+    ttl: u32,
+    filter: String,
+    /// The lower-cased wire name of the zone and its label count.
+    zone: Vec<u8>,
+    zone_labels: usize,
+    /// The wire name `hostmaster.<zone>`.
+    mailbox: Vec<u8>,
+    client: Arc<Client>,
+    health: Arc<Health>,
+    /// The metrics of each Listener, found by the Query's local address.
+    metrics: Vec<(SocketAddr, NomadMetrics)>,
+    /// The later `nomad` Directives of the Server Block, in Corefile order.
+    // CoreDNS v1.15.0 plugin/nomad/setup.go setup: `AddPlugin` chains one instance per Directive; the first whose zone holds the name answers.
+    more: Vec<Nomad>,
+}
+
+impl Nomad {
+    pub(crate) fn new(
+        settings: Settings,
+        env: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self, String> {
+        // CoreDNS v1.15.0 plugin/nomad/nomad.go processQName: `dns.Fqdn(zone)`.
+        let mut zone = settings.zone;
+        if !zone.ends_with('.') {
+            zone.push('.');
+        }
+        let zone: Name = zone
+            .parse()
+            .map_err(|error| format!("invalid zone: {error}"))?;
+        let mut mailbox = b"\x0ahostmaster".to_vec();
+        mailbox.extend_from_slice(zone.as_wire());
+        // RFC 1035 §2.3.4: the SOA mailbox, `hostmaster.<zone>`, is a name of at most 255 octets.
+        NameRef::parse(&mailbox, 0).map_err(|error| format!("invalid zone: {error}"))?;
+        let mut addresses = settings.addresses;
+        if addresses.is_empty() {
+            addresses.push(
+                env("NOMAD_ADDR")
+                    .filter(|address| !address.is_empty())
+                    .unwrap_or_else(|| DEFAULT_ADDRESS.to_owned()),
+            );
+        }
+        let https = addresses
+            .iter()
+            .any(|address| address.starts_with("https://"));
+        let options = Options::from_env(env, settings.token, https)?;
+        let client = Arc::new(Client::new(&addresses, options)?);
+        Ok(Self {
+            ttl: settings.ttl,
+            filter: settings.filter,
+            zone: zone.as_wire().to_ascii_lowercase(),
+            zone_labels: zone.label_count(),
+            mailbox,
+            health: Health::new(Arc::clone(&client)),
+            client,
+            metrics: Vec::new(),
+            more: Vec::new(),
+        })
+    }
+
+    /// Chain a later Directive of the same Server Block behind this one.
+    pub(crate) fn push(&mut self, later: Nomad) {
+        self.more.push(later);
+    }
+
+    pub(crate) fn register(&self, lifecycle: &mut pharos_server::Lifecycle) {
+        self.health.register(lifecycle);
+    }
+
+    pub(crate) fn set_metrics(
+        &mut self,
+        registry: &pharos_server::metrics::Registry,
+        listeners: &[pharos_server::ListenerKey],
+    ) {
+        for later in &mut self.more {
+            later.set_metrics(registry, listeners);
+        }
+        for listener in listeners {
+            let address = listener.address;
+            let server = if address.ip().is_unspecified() {
+                format!("dns://:{}", address.port())
+            } else {
+                format!("dns://{address}")
+            };
+            self.metrics.push((address, registry.nomad(&server)));
+        }
+    }
+
+    /// The service and namespace labels of a lower-cased Query name inside the zone.
+    // CoreDNS v1.15.0 plugin/nomad/nomad.go processQName and extractNamespaceAndService: `<service>.<namespace>.<zone>`, further labels ignored.
+    fn split<'w>(&self, wire: &'w [u8]) -> Option<(&'w [u8], &'w [u8])> {
+        let mut starts = [0_usize; 128];
+        let (mut count, mut at) = (0, 0);
+        while wire[at] != 0 {
+            starts[count] = at;
+            count += 1;
+            at += 1 + usize::from(wire[at]);
+        }
+        starts[count] = at;
+        // CoreDNS dnsutil.TrimZone: a name no longer than the zone is out of it; here the zone must also be the name's suffix.
+        let base = count
+            .checked_sub(self.zone_labels)
+            .filter(|base| *base >= 2)?;
+        if wire[starts[base]..] != self.zone[..] {
+            return None;
+        }
+        let label = |index: usize| {
+            &wire[starts[index] + 1..starts[index] + 1 + usize::from(wire[starts[index]])]
+        };
+        Some((label(0), label(1)))
+    }
+}
+
+impl Plugin for Nomad {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
+        let Some(question) = cx.query.questions().next() else {
+            return next.run(cx).await;
+        };
+        // RFC 1035 §6.2: Nomad data is IN-class; QCLASS=ANY matches it.
+        if question.qclass != Class::IN && question.qclass != Class::ANY {
+            return next.run(cx).await;
+        }
+        // RFC 4343 §3: names compare case-insensitively; CoreDNS lower-cases the Query name.
+        let mut wire = [0_u8; 255];
+        let mut len = 0;
+        for label in question.name.labels() {
+            wire[len] = label.len() as u8;
+            len += 1;
+            for byte in label {
+                wire[len] = byte.to_ascii_lowercase();
+                len += 1;
+            }
+        }
+        len += 1;
+        let wire = &wire[..len];
+        let Some((nomad, service, namespace)) =
+            std::iter::once(self).chain(&self.more).find_map(|nomad| {
+                nomad
+                    .split(wire)
+                    .map(|(service, namespace)| (nomad, service, namespace))
+            })
+        else {
+            return next.run(cx).await;
+        };
+        let max = cx.max_response_size.max(512);
+        if cx.response.capacity() < max {
+            if cx.protocol == Protocol::Tcp {
+                cx.response.reserve(max.saturating_sub(cx.response.len()));
+            } else {
+                return Outcome::Error(pharos_server::Error::ResponseBufferTooSmall);
+            }
+        }
+        let mut lease = nomad.client.lease();
+        let registrations = match lease.registrations(service, namespace, &nomad.filter).await {
+            Ok(registrations) => Some(registrations),
+            Err(error) => {
+                // CoreDNS v1.15.0 plugin/nomad/nomad.go ServeDNS: a failed lookup is logged and answered empty.
+                pharos_server::logging::log_bounded(
+                    "WARN",
+                    "nomad",
+                    format_args!("service lookup failed: {error}"),
+                );
+                None
+            }
+        };
+        // RFC 1035 §4.1.1: Responses set QR and copy the opcode and RD; CoreDNS sets AA.
+        let mut flags = 0x8400 | (cx.query.flags() & 0x7800);
+        if cx.query.opcode() == Opcode::QUERY {
+            flags |= cx.query.flags() & 0x0110;
+        }
+        let reply = Reply {
+            id: cx.query.id(),
+            flags,
+            max_size: max,
+            question,
+            owner: wire,
+            ttl: nomad.ttl,
+            mailbox: &nomad.mailbox,
+        };
+        match response::build(cx.response, &reply, registrations) {
+            Ok(success) => {
+                // CoreDNS v1.15.0 plugin/nomad/nomad.go ServeDNS: the counters are labelled by the Query's namespace.
+                if let Some((_, metrics)) = nomad
+                    .metrics
+                    .iter()
+                    .find(|(address, _)| *address == cx.local)
+                {
+                    if success {
+                        metrics.success(namespace);
+                    } else {
+                        metrics.failure(namespace);
+                    }
+                }
+                Outcome::Response
+            }
+            Err(error) => Outcome::Error(error),
+        }
+    }
+
+    fn readiness(&self) -> Option<&dyn Readiness> {
+        Some(self)
+    }
+}
+
+// CoreDNS v1.15.0 plugin/nomad/ready.go Ready: each instance reports to `ready`, so the Server Block is ready when all of its Directives are.
+impl Readiness for Nomad {
+    fn ready(&self) -> bool {
+        self.health.ready() && self.more.iter().all(Readiness::ready)
+    }
+}
+
+#[cfg(test)]
+mod tests;

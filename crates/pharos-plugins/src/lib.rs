@@ -108,6 +108,8 @@ mod message_len;
 pub mod minimal;
 #[cfg(feature = "plugin-multisocket")]
 pub mod multisocket;
+#[cfg(feature = "plugin-nomad")]
+pub mod nomad;
 #[cfg(feature = "plugin-nsid")]
 pub mod nsid;
 #[cfg(feature = "plugin-on")]
@@ -570,6 +572,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("loop", include_str!("loop/README.md")),
     ("minimal", include_str!("minimal/README.md")),
     ("multisocket", include_str!("multisocket/README.md")),
+    ("nomad", include_str!("nomad/README.md")),
     ("nsid", include_str!("nsid/README.md")),
     ("pprof", include_str!("pprof/README.md")),
     ("on", include_str!("on/README.md")),
@@ -746,6 +749,7 @@ pub fn servers_with_registry(
             feature = "plugin-siit",
             feature = "plugin-autopath",
             feature = "plugin-template",
+            feature = "plugin-nomad",
             feature = "plugin-tsig"
         ))]
         let mut block = block;
@@ -951,6 +955,11 @@ pub fn servers_with_registry(
         if let Some(siit) = &mut block.config.siit {
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
             siit.set_metrics(&metrics, &listeners);
+        }
+        #[cfg(feature = "plugin-nomad")]
+        if let Some(nomad) = &mut block.config.nomad {
+            let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+            nomad.set_metrics(&metrics, &listeners);
         }
         #[cfg(feature = "plugin-autopath")]
         if let Some(provider) = block

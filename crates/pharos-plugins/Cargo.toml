@@ -90,6 +90,7 @@ default = [
     "plugin-metadata",
     "plugin-minimal",
     "plugin-multisocket",
+    "plugin-nomad",
     "plugin-nsid",
     "plugin-pprof",
     "plugin-on",
@@ -170,7 +171,7 @@ plugin-whoami = []
 plugin-on = []
 plugin-sign = ["dep:pharos-dnssec"]
 plugin-view = []
-plugin-nomad = []
+plugin-nomad = ["dep:serde", "dep:serde_json"]
 
 [lints]
 workspace = true
