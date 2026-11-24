@@ -2,5 +2,5 @@
 xtask = "run -p xtask --"
 
 [env]
-# Debug builds overflow the 2 MiB test-thread stack: the generated plugin chain (crates/pharos-plugins/build.rs:270, ~37 nested async serve_{i}) keeps 2-4 unelided child futures per poll frame (~2 MB measured); release fits.
-RUST_MIN_STACK = "8388608"
+# Debug builds overflow the 2 MiB test-thread stack: the generated plugin chain (crates/pharos-plugins/build.rs:270, ~37 nested async serve_{i}) keeps 2-4 unelided child futures per poll frame (~4 MB measured); Self Lookup polls up to three chain traversals inline per task (SELF_LOOKUP_TASK_EVERY); release fits.
+RUST_MIN_STACK = "16777216"
