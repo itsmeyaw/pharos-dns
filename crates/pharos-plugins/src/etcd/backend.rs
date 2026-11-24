@@ -609,7 +609,8 @@ impl Lookup<'_, '_, '_> {
 
     /// CoreDNS v1.15.0 plugin/etcd/etcd.go `Lookup`: ask the Server for `name`.
     async fn foreign(&self, name: &Name, qtype: Type) -> Option<Foreign> {
-        let wire = Arc::new(self.cx.self_lookup(name, qtype).await.ok()?);
+        // Rr values outlive the Lookup, so take the buffer out of the pool.
+        let wire = Arc::new(self.cx.self_lookup(name, qtype).await.ok()?.into_vec());
         let message = Message::parse(&wire).ok()?;
         let answers = message
             .answers()
