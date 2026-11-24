@@ -199,10 +199,8 @@ impl Plugin for Dns64 {
             .filter(|rr| rr.rtype == Type::SOA)
             .last()
             .map_or(600, |rr| rr.ttl);
-        let name = question.name.to_name();
-        // shortcut: Self Lookup allocates; remove when issue #86 makes it allocation-free.
         // RFC 6147 §5.1.6: Retrieve A records when the AAAA lookup provides no usable AAAA answer.
-        let mut lookup = match cx.self_lookup(&name, Type::A).await {
+        let mut lookup = match cx.self_lookup_ref(question.name, Type::A).await {
             Ok(wire) => wire,
             Err(error) => return Outcome::Error(error),
         };
@@ -243,6 +241,7 @@ impl Plugin for Dns64 {
             }
             cname_hops += 1;
             // RFC 6147 §5.1.5: Continue A lookup at each CNAME target until terminal data.
+            // shortcut: following a CNAME allocates the target Name and chain Vec; skipped for direct A answers.
             lookup_chain.push(lookup);
             lookup = match cx.self_lookup(&target, Type::A).await {
                 Ok(wire) => wire,

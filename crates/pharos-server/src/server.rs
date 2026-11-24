@@ -152,6 +152,7 @@ pub struct Server<C> {
     quic_metrics: Option<crate::QuicMetrics>,
     has_views: Arc<AtomicBool>,
     root: pharos_proto::Name,
+    lookups: Arc<crate::LookupPools>,
 }
 
 impl<C: Chain> Server<C> {
@@ -276,6 +277,7 @@ impl<C: Chain> Server<C> {
             quic_metrics,
             has_views,
             root: ".".parse().expect("root Domain"),
+            lookups: Arc::default(),
         }
     }
 
@@ -391,28 +393,8 @@ impl<C: Chain> Handler for Server<C> {
 }
 
 impl<C: Chain> crate::SelfLookupServer for Server<C> {
-    fn lookup<'a>(
-        &'a self,
-        wire: &'a [u8],
-        peer: SocketAddr,
-        protocol: Protocol,
-        depth: u8,
-        flags: (bool, bool),
-        response: &'a mut Vec<u8>,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
-        // shortcut: static re-entry boxes a future, remove if recursive dispatch no longer needs it.
-        Box::pin(self.handle_with_depth(
-            wire,
-            peer,
-            protocol,
-            response,
-            (depth, flags.0, flags.1),
-            self,
-            "",
-        ))
-    }
-
     fn owned(&self) -> Option<Arc<dyn crate::OwnedSelfLookupServer>> {
+        // shortcut: a Server not held in an Arc clones itself per Self Lookup; Listeners use `handle_shared`.
         Some(Arc::new(Self {
             router: Arc::clone(&self.router),
             key: self.key,
@@ -432,59 +414,60 @@ impl<C: Chain> crate::SelfLookupServer for Server<C> {
             has_views: Arc::clone(&self.has_views),
             dropped: self.dropped.clone(),
             root: self.root.clone(),
+            lookups: Arc::clone(&self.lookups),
         }))
     }
 }
 
 impl<C: Chain> crate::SelfLookupServer for Arc<Server<C>> {
-    fn lookup<'a>(
-        &'a self,
-        wire: &'a [u8],
-        peer: SocketAddr,
-        protocol: Protocol,
-        depth: u8,
-        flags: (bool, bool),
-        response: &'a mut Vec<u8>,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
-        Box::pin(self.handle_with_depth(
-            wire,
-            peer,
-            protocol,
-            response,
-            (depth, flags.0, flags.1),
-            self,
-            "",
-        ))
-    }
-
     fn owned(&self) -> Option<Arc<dyn crate::OwnedSelfLookupServer>> {
         Some(Arc::clone(self) as Arc<dyn crate::OwnedSelfLookupServer>)
     }
 }
 
 impl<C: Chain> crate::OwnedSelfLookupServer for Server<C> {
-    fn lookup<'a>(
-        self: Arc<Self>,
-        wire: &'a [u8],
-        peer: SocketAddr,
-        protocol: Protocol,
-        depth: u8,
-        flags: (bool, bool),
-        response: &'a mut Vec<u8>,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
-        Box::pin(async move {
-            self.handle_with_depth(
-                wire,
-                peer,
-                protocol,
-                response,
-                (depth, flags.0, flags.1),
-                &self,
-                "",
-            )
-            .await
-        })
+    fn pools(&self) -> &Arc<crate::LookupPools> {
+        &self.lookups
     }
+
+    fn lookup(self: Arc<Self>, request: crate::LookupRequest) -> crate::lookup::Lookup {
+        Arc::clone(&self.lookups).lookup(run_lookup::<C>, (self, request))
+    }
+
+    fn spawn(
+        self: Arc<Self>,
+        request: crate::LookupRequest,
+    ) -> tokio::task::JoinHandle<crate::LookupOutput> {
+        tokio::spawn(run_lookup::<C>((self, request)))
+    }
+}
+
+// Owns its inputs so a pooled slot can hold the future between lookups.
+async fn run_lookup<C: Chain>(
+    (server, request): (Arc<Server<C>>, crate::LookupRequest),
+) -> crate::LookupOutput {
+    let crate::LookupRequest {
+        wire,
+        mut response,
+        peer,
+        protocol,
+        depth,
+        siit,
+        autopath,
+    } = request;
+    let action = server
+        .handle_with_depth(
+            &wire,
+            peer,
+            protocol,
+            &mut response,
+            (depth, siit, autopath),
+            &server,
+            "",
+        )
+        .await;
+    server.lookups.put_wire(wire);
+    crate::LookupOutput { action, response }
 }
 
 impl<C: Chain> Server<C> {

@@ -10,10 +10,10 @@
   has no Zone-tree record (including out-of-Zone and empty-nonterminal targets),
   for NS Queries, or for SOA Queries targeting the apex. Zone Cut Referrals and
   ordinary locally resolved targets avoid it. This mirrors CoreDNS and includes
-  in-Zone exceptions to the no-allocation Query rule until #86 is implemented.
-- The current Self Lookup API allocates Query and Response buffers and a recursive
-  task/future. Resolving locally instead would bypass the Plugin Chain and can
-  change routing or other Plugin behavior; allocation-free re-entry needs #86.
+  in-Zone exceptions to the no-allocation Query rule (#86).
+- Self Lookup buffers and futures are pooled per Listener, but the Zone lookup
+  still copies the target Name per lookup. Resolving locally instead would bypass
+  the Plugin Chain and can change routing or other Plugin behavior.
 - With no configured matching Zone, `test.`, `invalid.`, and RFC 6303 reverse names return authoritative NXDOMAIN with a local SOA. An explicitly configured Zone wins.
 
 ## Sources

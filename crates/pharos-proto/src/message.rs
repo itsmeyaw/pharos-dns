@@ -218,12 +218,23 @@ impl<'a> Message<'a> {
     /// Copy this Message with its first Question replaced by an IN Question.
     pub fn with_question(&self, name: &Name, qtype: Type) -> Result<Vec<u8>, BuildError> {
         let mut wire = Vec::with_capacity(self.wire.len() + name.as_wire().len());
+        let name = NameRef::parse(name.as_wire(), 0).expect("validated name");
+        self.with_question_into(name, qtype, &mut wire)?;
+        Ok(wire)
+    }
+
+    /// Like `with_question`, but writes into a caller-provided buffer so it can be reused.
+    pub fn with_question_into(
+        &self,
+        name: NameRef<'_>,
+        qtype: Type,
+        wire: &mut Vec<u8>,
+    ) -> Result<(), BuildError> {
         let mut builder =
-            MessageBuilder::new(&mut wire, usize::from(u16::MAX), self.id(), self.flags())?;
+            MessageBuilder::new(wire, usize::from(u16::MAX), self.id(), self.flags())?;
         let mut questions = self.questions();
         questions.next().ok_or(BuildError::InvalidRdata)?;
         // RFC 4343 §4.1: preserve the caller-supplied question name's case when rebuilding.
-        let name = NameRef::parse(name.as_wire(), 0).expect("validated name");
         // RFC 1035 §4.1.2: encode the requested QNAME, QTYPE, and QCLASS in the Question.
         if !builder.question(name, qtype, Class::IN)? {
             return Err(BuildError::SizeLimit);
@@ -255,7 +266,7 @@ impl<'a> Message<'a> {
             }
         }
         let _ = builder.finish();
-        Ok(wire)
+        Ok(())
     }
 
     /// Return the original Message bytes without copying; view changes are not applied.

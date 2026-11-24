@@ -39,3 +39,24 @@ fn new_question_preserves_records_with_compressed_names() {
     assert_eq!(answer.ttl, 60);
     assert!(query.opt().is_none());
 }
+
+#[test]
+fn new_question_into_reuses_caller_buffer_without_allocating() {
+    let wire = b"\x12\x34\x01\x30\0\x01\0\0\0\0\0\x01\x07example\x03com\0\0\x01\0\x01\0\0\x29\x04\xd0\0\0\x80\0\0\x06\xfd\xe9\0\x02\xc0\x01";
+    let original = Message::parse(wire).unwrap();
+    let name = original.questions().next().unwrap().name;
+    let mut buffer = Vec::with_capacity(512);
+    buffer.extend_from_slice(b"stale");
+    let pointer = buffer.as_ptr();
+    original
+        .with_question_into(name, Type::MX, &mut buffer)
+        .unwrap();
+    assert_eq!(buffer.as_ptr(), pointer);
+    let query = Message::parse(&buffer).unwrap();
+    assert_eq!(query.questions().next().unwrap().qtype, Type::MX);
+    assert_eq!(
+        query.questions().next().unwrap().name.to_string(),
+        "example.com."
+    );
+    assert!(query.opt().unwrap().dnssec_ok());
+}

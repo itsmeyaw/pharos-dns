@@ -674,7 +674,7 @@ impl Plugin for Template {
                 && let Ok(target) = NameRef::parse(&rr.rdata, 0)
             {
                 // RFC 1034 §§3.4.1, 3.6.2: ANY includes CNAME and does not restart target lookup.
-                // shortcut: Each other QTYPE can allocate one Self Lookup per answer CNAME; #86 removes it.
+                // shortcut: Each other QTYPE copies the target Name and holds a result Vec per answer CNAME; Self Lookup buffers and future are pooled, see #86.
                 if let Ok(response) = cx.self_lookup(&target.to_name(), question.qtype).await {
                     lookups.push((index, response));
                 }

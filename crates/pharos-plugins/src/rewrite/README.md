@@ -4,7 +4,7 @@
 
 ## rewrite
 
-- CNAME Self Lookup allocates per Query; issue #86 tracks allocation-free Self Lookup.
+- CNAME Self Lookup uses pooled buffers and futures (#86) but still copies the target Name and Query per Query; it is not allocation-free.
 - The CNAME rewrite depth limit counts all Self Lookups, including those from other Plugins; CoreDNS counts only CNAME rewrites.
 - Reaching that depth limit now returns SERVFAIL instead of a partial NOERROR chain (RFC 1034 §3.6.2).
 - EDNS rewrites use preallocated scratch storage and serialize Queries at the same Self Lookup depth; independent depths use separate buffers.

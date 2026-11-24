@@ -10,13 +10,12 @@ use std::{
     future::Future,
     io,
     net::{Ipv4Addr, SocketAddr},
-    pin::Pin,
     sync::Arc,
     time::Duration,
 };
 
 use arc_swap::ArcSwap;
-use pharos_proto::{BuildError, Message, Name, Rcode, Type};
+use pharos_proto::{BuildError, Message, Name, NameRef, Rcode, Type};
 use tokio::{
     net::{TcpListener, UdpSocket},
     sync::watch,
@@ -37,6 +36,7 @@ pub use https::HttpsOptions;
 mod https3;
 mod lifecycle;
 pub mod logging;
+mod lookup;
 pub mod metrics;
 mod outcome;
 mod panic;
@@ -47,6 +47,8 @@ mod quic;
 mod quota;
 pub use admission::{Admission, admit, admit_with_update, write_error};
 pub use lifecycle::{Lifecycle, Phase};
+pub use lookup::LookupResponse;
+use lookup::{LookupOutput, LookupPools, LookupRequest};
 pub use outcome::{TsigSigning, finish_outcome, finish_outcome_signed, response_limit};
 pub use panic::{contain_panic, panics_total};
 pub use quic::{QuicMetrics, QuicOptions, bind as bind_quic_socket};
@@ -577,6 +579,9 @@ fn merge_query<'q>(parent: Message<'q>, child: Message<'_>) -> Message<'q> {
     query
 }
 
+/// Nested Self Lookups poll inline, except that every this-many levels runs in its own task.
+const SELF_LOOKUP_TASK_EVERY: u8 = 3;
+
 /// The Listener state and depth associated with a Query.
 struct SelfLookupState<'a> {
     server: &'a dyn SelfLookupServer,
@@ -587,31 +592,19 @@ struct SelfLookupState<'a> {
 
 // Type erasure keeps Context nongeneric without allocating on ordinary Queries.
 trait SelfLookupServer: Sync {
-    fn lookup<'a>(
-        &'a self,
-        wire: &'a [u8],
-        peer: SocketAddr,
-        protocol: Protocol,
-        depth: u8,
-        flags: (bool, bool),
-        response: &'a mut Vec<u8>,
-    ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>>;
-
     fn owned(&self) -> Option<Arc<dyn OwnedSelfLookupServer>> {
         None
     }
 }
 
 trait OwnedSelfLookupServer: Send + Sync {
-    fn lookup<'a>(
-        self: Arc<Self>,
-        wire: &'a [u8],
-        peer: SocketAddr,
-        protocol: Protocol,
-        depth: u8,
-        flags: (bool, bool),
-        response: &'a mut Vec<u8>,
-    ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>>;
+    fn pools(&self) -> &Arc<LookupPools>;
+
+    /// Run the lookup inline, in a pooled future slot.
+    fn lookup(self: Arc<Self>, request: LookupRequest) -> lookup::Lookup;
+
+    /// Run the lookup as its own task, which restarts the stack.
+    fn spawn(self: Arc<Self>, request: LookupRequest) -> tokio::task::JoinHandle<LookupOutput>;
 }
 
 /// Owned Listener state for a detached Query, including its Self Lookup depth.
@@ -623,18 +616,6 @@ pub struct SelfLookupHandle {
 }
 
 impl SelfLookupServer for SelfLookupHandle {
-    fn lookup<'a>(
-        &'a self,
-        wire: &'a [u8],
-        peer: SocketAddr,
-        protocol: Protocol,
-        depth: u8,
-        flags: (bool, bool),
-        response: &'a mut Vec<u8>,
-    ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
-        Arc::clone(&self.server).lookup(wire, peer, protocol, depth, flags, response)
-    }
-
     fn owned(&self) -> Option<Arc<dyn OwnedSelfLookupServer>> {
         Some(Arc::clone(&self.server))
     }
@@ -713,7 +694,18 @@ impl<'q, 'a> Context<'q, 'a> {
     }
 
     /// Route a new Query through this Query's Listener and capture its Response.
-    pub async fn self_lookup(&self, name: &Name, qtype: Type) -> Result<Vec<u8>, Error> {
+    pub async fn self_lookup(&self, name: &Name, qtype: Type) -> Result<LookupResponse, Error> {
+        let name = NameRef::parse(name.as_wire(), 0).expect("validated name");
+        self.self_lookup_inner(self.query, name, qtype, false, false)
+            .await
+    }
+
+    /// Like `self_lookup`, for a name already in a Message, without copying it.
+    pub async fn self_lookup_ref(
+        &self,
+        name: NameRef<'_>,
+        qtype: Type,
+    ) -> Result<LookupResponse, Error> {
         self.self_lookup_inner(self.query, name, qtype, false, false)
             .await
     }
@@ -724,19 +716,28 @@ impl<'q, 'a> Context<'q, 'a> {
         query: Message<'_>,
         name: &Name,
         qtype: Type,
-    ) -> Result<Vec<u8>, Error> {
+    ) -> Result<LookupResponse, Error> {
+        let name = NameRef::parse(name.as_wire(), 0).expect("validated name");
         self.self_lookup_inner(query, name, qtype, false, false)
             .await
     }
 
     /// Re-enter for SIIT synthesis, preventing recursive SIIT interception.
-    pub async fn siit_lookup(&self, name: &Name, qtype: Type) -> Result<Vec<u8>, Error> {
+    pub async fn siit_lookup(
+        &self,
+        name: NameRef<'_>,
+        qtype: Type,
+    ) -> Result<LookupResponse, Error> {
         self.self_lookup_inner(self.query, name, qtype, true, false)
             .await
     }
 
     /// Re-enter for search-path completion without recursively restarting it.
-    pub async fn autopath_lookup(&self, name: &Name, qtype: Type) -> Result<Vec<u8>, Error> {
+    pub async fn autopath_lookup(
+        &self,
+        name: NameRef<'_>,
+        qtype: Type,
+    ) -> Result<LookupResponse, Error> {
         self.self_lookup_inner(self.query, name, qtype, false, true)
             .await
     }
@@ -760,11 +761,11 @@ impl<'q, 'a> Context<'q, 'a> {
     async fn self_lookup_inner(
         &self,
         source: Message<'_>,
-        name: &Name,
+        name: NameRef<'_>,
         qtype: Type,
         siit: bool,
         autopath: bool,
-    ) -> Result<Vec<u8>, Error> {
+    ) -> Result<LookupResponse, Error> {
         let state = self
             .metadata
             .self_lookup
@@ -773,51 +774,41 @@ impl<'q, 'a> Context<'q, 'a> {
         if state.depth >= 10 {
             return Err(Error::SelfLookupDepth);
         }
-        let query = source.with_question(name, qtype).map_err(Error::Build)?;
-        if let Some(server) = state.server.owned()
+        let server = state.server.owned().ok_or(Error::SelfLookupUnavailable)?;
+        let pools = Arc::clone(server.pools());
+        let mut wire = pools.take_wire();
+        if let Err(error) = source.with_question_into(name, qtype, &mut wire) {
+            pools.put_wire(wire);
+            return Err(Error::Build(error));
+        }
+        let depth = state.depth + 1;
+        let request = LookupRequest {
+            wire,
+            response: pools.take_response(),
+            peer: self.client,
+            protocol: self.protocol,
+            depth,
+            siit: siit || state.siit,
+            autopath: autopath || state.autopath,
+        };
+        // Every third nested lookup starts a task so inline polling never nests deeper than two levels.
+        let output = if depth % SELF_LOOKUP_TASK_EVERY == 0
             && tokio::runtime::Handle::try_current().is_ok()
         {
-            let peer = self.client;
-            let protocol = self.protocol;
-            let depth = state.depth + 1;
-            let siit = siit || state.siit;
-            let autopath = autopath || state.autopath;
-            // shortcut: Self Lookup spawns an allocated task to bound recursive stack use; remove with #86.
-            let mut task = AbortOnDrop(tokio::spawn(async move {
-                let mut response = Vec::with_capacity(usize::from(u16::MAX));
-                let action = server
-                    .lookup(
-                        &query,
-                        peer,
-                        protocol,
-                        depth,
-                        (siit, autopath),
-                        &mut response,
-                    )
-                    .await;
-                (action, response)
-            }));
-            return match (&mut task.0).await {
-                Ok((Action::Respond, response)) => Ok(response),
-                Ok((Action::Drop | Action::Stream(_), _)) => Err(Error::SelfLookupDropped),
-                Err(_) => Err(Error::PluginPanic),
-            };
-        }
-        let mut response = Vec::with_capacity(usize::from(u16::MAX));
-        match state
-            .server
-            .lookup(
-                &query,
-                self.client,
-                self.protocol,
-                state.depth + 1,
-                (siit || state.siit, autopath || state.autopath),
-                &mut response,
-            )
-            .await
-        {
-            Action::Respond => Ok(response),
-            Action::Drop | Action::Stream(_) => Err(Error::SelfLookupDropped),
+            let mut task = AbortOnDrop(server.spawn(request));
+            match (&mut task.0).await {
+                Ok(output) => output,
+                Err(_) => return Err(Error::PluginPanic),
+            }
+        } else {
+            server.lookup(request).await
+        };
+        match output.action {
+            Action::Respond => Ok(LookupResponse::new(output.response, pools)),
+            Action::Drop | Action::Stream(_) => {
+                pools.put_response(output.response);
+                Err(Error::SelfLookupDropped)
+            }
         }
     }
 }

@@ -170,9 +170,7 @@ impl Plugin for Siit {
             .filter(|rr| rr.rtype == Type::SOA)
             .last()
             .map_or(600, |rr| rr.ttl);
-        let name = question.name.to_name();
-        // shortcut: Self Lookup allocates; remove when issue #86 makes it allocation-free.
-        let wire = match cx.siit_lookup(&name, Type::AAAA).await {
+        let wire = match cx.siit_lookup(question.name, Type::AAAA).await {
             Ok(wire) => wire,
             Err(error) => return Outcome::Error(error),
         };

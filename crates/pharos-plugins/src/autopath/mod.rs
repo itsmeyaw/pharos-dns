@@ -218,6 +218,7 @@ impl Plugin for AutoPath {
             return outcome;
         }
         let original = if outcome == Outcome::Response {
+            // shortcut: snapshotting the first Response allocates per search; Self Lookup buffers and future are pooled (#86).
             cx.response.clone()
         } else {
             Vec::new()
@@ -242,8 +243,7 @@ impl Plugin for AutoPath {
             let Ok(name) = NameRef::parse(&wire[..used + suffix.len()], 0) else {
                 continue;
             };
-            // shortcut: search Self Lookup allocates; remove when #86 makes it allocation-free.
-            let reply = match cx.autopath_lookup(&name.to_name(), question.qtype).await {
+            let reply = match cx.autopath_lookup(name, question.qtype).await {
                 Ok(reply) => reply,
                 Err(ServerError::SelfLookupDropped) => continue,
                 Err(error) => return Outcome::Error(error),
