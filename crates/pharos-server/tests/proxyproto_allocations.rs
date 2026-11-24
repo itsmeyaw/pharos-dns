@@ -150,9 +150,28 @@ fn proxied(tracking: bool) -> Config {
     config
 }
 
+// The libtest main thread still allocates after spawning the test thread (running-test map, timeout queue, blocking receive). Wait until it is parked so that cannot land inside a measured Region.
+fn wait_for_harness_idle() {
+    let path = format!("/proc/self/task/{}/stat", std::process::id());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    // proc_pid_stat(5): the state is the first field after the last ")" that ends the command name.
+    while let Ok(stat) = std::fs::read_to_string(&path) {
+        if stat
+            .rsplit(") ")
+            .next()
+            .is_some_and(|rest| rest.starts_with('S'))
+            || std::time::Instant::now() > deadline
+        {
+            return;
+        }
+        std::thread::yield_now();
+    }
+}
+
 // ADR-0007: the allocator counts are process-wide, so each test reruns itself alone in a child process.
 fn run_isolated(name: &str) -> bool {
     if std::env::var_os("PHAROS_ALLOCATION_CHILD").is_some() {
+        wait_for_harness_idle();
         return false;
     }
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
