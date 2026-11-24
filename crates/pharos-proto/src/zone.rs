@@ -1,7 +1,9 @@
 //! Streaming presentation-format Zone records.
 
 mod rdata;
+mod record_text;
 pub use rdata::{RdataParseError, parse_rdata};
+pub use record_text::{RecordText, RecordTextError, parse_record_text};
 
 use std::{
     fmt::{self, Write},
@@ -1018,31 +1020,42 @@ fn parse_ttl(value: &str) -> Option<u32> {
 
 // RFC 1035 §3.2.4 and RFC 3597 §5: classes use mnemonics or CLASS followed by a number.
 fn parse_class(value: &str) -> Option<Class> {
-    let upper = value.to_ascii_uppercase();
-    Some(match upper.as_str() {
-        "IN" => Class::IN,
-        "CH" | "CHAOS" => Class::CH,
-        "HS" | "HESIOD" => Class::HS,
-        "CS" => Class::CS,
-        "NONE" => Class::NONE,
-        "ANY" => Class::ANY,
-        _ => {
-            let digits = upper.strip_prefix("CLASS")?;
-            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-                return None;
-            }
-            Class(digits.parse().ok()?)
+    for (mnemonic, class) in [
+        ("IN", Class::IN),
+        ("CH", Class::CH),
+        ("CHAOS", Class::CH),
+        ("HS", Class::HS),
+        ("HESIOD", Class::HS),
+        ("CS", Class::CS),
+        ("NONE", Class::NONE),
+        ("ANY", Class::ANY),
+    ] {
+        if value.eq_ignore_ascii_case(mnemonic) {
+            return Some(class);
         }
-    })
+    }
+    parse_decimal_suffix(value, "CLASS").map(Class)
 }
 
 // RFC 3597 §5: unknown types use TYPE followed by a decimal number.
 fn parse_type(value: &str) -> Option<Type> {
-    let upper = value.to_ascii_uppercase();
-    if let Some(number) = upper.strip_prefix("TYPE") {
-        return (!number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
-            .then(|| number.parse().ok().map(Type))
-            .flatten();
+    if let Some(code) = parse_decimal_suffix(value, "TYPE") {
+        return Some(Type(code));
     }
-    Type::from_mnemonic(&upper)
+    if value.len() >= 4 && value.is_char_boundary(4) && value[..4].eq_ignore_ascii_case("TYPE") {
+        return None;
+    }
+    Type::from_mnemonic(value)
+}
+
+// Allocation-free `PREFIX<digits>` match, ignoring ASCII case.
+fn parse_decimal_suffix(value: &str, prefix: &str) -> Option<u16> {
+    let digits = value
+        .get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .map(|_| &value[prefix.len()..])?;
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
