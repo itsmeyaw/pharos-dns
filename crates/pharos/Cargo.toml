@@ -18,12 +18,12 @@ workspace = true
 aws-lc-rs = "1"
 getrandom = "0.2"
 mimalloc = "0.1"
-pharos-plugins = { version = "0.3.0", path = "../pharos-plugins" }
-pharos-corefile = { version = "0.3.0", path = "../pharos-corefile" }
-pharos-server = { version = "0.3.0", path = "../pharos-server" }
+pharos-plugins = { version = "0.4.0", path = "../pharos-plugins" }
+pharos-corefile = { version = "0.4.0", path = "../pharos-corefile" }
+pharos-server = { version = "0.4.0", path = "../pharos-server" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
 
 [dev-dependencies]
-pharos-proto = { version = "0.3.0", path = "../pharos-proto" }
+pharos-proto = { version = "0.4.0", path = "../pharos-proto" }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }

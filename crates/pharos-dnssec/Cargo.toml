@@ -12,4 +12,4 @@ workspace = true
 [dependencies]
 aws-lc-rs = "1.19"
 base64 = "0.22"
-pharos-proto = { version = "0.3.0", path = "../pharos-proto" }
+pharos-proto = { version = "0.4.0", path = "../pharos-proto" }
