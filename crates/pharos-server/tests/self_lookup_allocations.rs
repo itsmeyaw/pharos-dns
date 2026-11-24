@@ -10,13 +10,12 @@ use std::{
     alloc::System,
     future::Future,
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::Arc,
     task::{Context as TaskContext, Poll, Waker},
 };
 
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
-static SERIAL: Mutex<()> = Mutex::new(());
 
 const OTHER: &[u8] = b"\x01b\x05other\0";
 const THIRD: &[u8] = b"\x01c\x05third\0";
@@ -100,11 +99,29 @@ fn server(first: Zone, second: Zone) -> Arc<Server<Zone>> {
     Arc::new(Server::new(router, key))
 }
 
+/// Re-runs the named test alone in a child process and returns true in the parent.
+/// The global counter sees every thread, so sibling tests and the harness would pollute a region.
+fn run_isolated(name: &str) -> bool {
+    if std::env::var_os("PHAROS_ALLOCATION_CHILD").is_some() {
+        return false;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--nocapture"])
+        .env("PHAROS_ALLOCATION_CHILD", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+    true
+}
+
 /// Allocations over `queries` Queries after one warm-up Query. Polled without a runtime.
 fn allocations(server: &Arc<Server<Zone>>, queries: usize) -> usize {
-    let _serial = SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let query = b"\x12\x34\x01\0\0\x01\0\0\0\0\0\0\x01a\x07example\0\0\x01\0\x01";
     let peer: SocketAddr = "192.0.2.10:1234".parse().unwrap();
     let mut response = Vec::with_capacity(65535);
@@ -129,18 +146,27 @@ fn allocations(server: &Arc<Server<Zone>>, queries: usize) -> usize {
 
 #[test]
 fn self_lookup_does_not_allocate_once_warmed() {
+    if run_isolated("self_lookup_does_not_allocate_once_warmed") {
+        return;
+    }
     let server = server(Zone::Lookup(OTHER), Zone::Answer);
     assert_eq!(allocations(&server, 100), 0);
 }
 
 #[test]
 fn nested_self_lookup_does_not_allocate_once_warmed() {
+    if run_isolated("nested_self_lookup_does_not_allocate_once_warmed") {
+        return;
+    }
     let server = server(Zone::Lookup(OTHER), Zone::Lookup(THIRD));
     assert_eq!(allocations(&server, 100), 0);
 }
 
 #[test]
 fn detached_self_lookup_does_not_allocate_once_warmed() {
+    if run_isolated("detached_self_lookup_does_not_allocate_once_warmed") {
+        return;
+    }
     let server = server(Zone::Detached(OTHER), Zone::Answer);
     assert_eq!(allocations(&server, 100), 0);
 }
