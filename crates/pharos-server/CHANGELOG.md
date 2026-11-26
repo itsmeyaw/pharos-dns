@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/itsmeyaw/pharos-dns/compare/pharos-server-v0.3.0...pharos-server-v0.4.0) - 2026-11-24
+
+### Added
+
+- *(nomad)* add nomad Plugin ([#205](https://github.com/itsmeyaw/pharos-dns/pull/205))
+- *(on)* add on Plugin ([#204](https://github.com/itsmeyaw/pharos-dns/pull/204))
+- *(dnstap)* add dnstap Plugin ([#199](https://github.com/itsmeyaw/pharos-dns/pull/199))
+- *(pprof)* add pprof Plugin ([#198](https://github.com/itsmeyaw/pharos-dns/pull/198))
+- *(trace)* add trace Plugin ([#197](https://github.com/itsmeyaw/pharos-dns/pull/197))
+- *(geoip)* add geoip Plugin ([#196](https://github.com/itsmeyaw/pharos-dns/pull/196))
+
+### Other
+
+- *(template)* parse rendered records without allocating ([#208](https://github.com/itsmeyaw/pharos-dns/pull/208))
+- *(server)* pool Self Lookup buffers and futures ([#209](https://github.com/itsmeyaw/pharos-dns/pull/209))
+
 ## [0.3.0](https://github.com/itsmeyaw/pharos-dns/compare/pharos-server-v0.2.0...pharos-server-v0.3.0) - 2026-11-20
 
 ### Added

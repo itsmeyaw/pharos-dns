@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/itsmeyaw/pharos-dns/compare/pharos-proto-v0.3.0...pharos-proto-v0.4.0) - 2026-11-24
+
+### Other
+
+- *(template)* parse rendered records without allocating ([#208](https://github.com/itsmeyaw/pharos-dns/pull/208))
+- *(server)* pool Self Lookup buffers and futures ([#209](https://github.com/itsmeyaw/pharos-dns/pull/209))
+
 ## [0.3.0](https://github.com/itsmeyaw/pharos-dns/compare/pharos-proto-v0.2.0...pharos-proto-v0.3.0) - 2026-11-20
 
 ### Added
